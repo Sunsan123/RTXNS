@@ -18,16 +18,19 @@ struct PS_INPUT
     float4 pos : SV_Position;
     float3 norm : NORMAL;
     float3 view : VIEW;
+    float3 tan : TANGENT;
 }
 
 [shader("vertex")]
 void main_vs(
-    float3 i_pos : POSITION, 
-    float3 i_norm : NORMAL, 
+    float3 i_pos: POSITION,
+    float3 i_norm: NORMAL,
+    float3 i_tan: TANGENT,
     out PS_INPUT output)
 {
     output.pos = mul(float4(i_pos, 1), gConst.viewProject);
     output.norm = i_norm;
+    output.tan = i_tan;
     output.view = gConst.cameraPos.xyz - i_pos;
 }
 
@@ -41,15 +44,19 @@ void main_ps(
     //----------- Prepare input parameters
     float3 view = normalize(input.view);
     float3 norm = normalize(input.norm);
+    float3 tan = normalize(input.tan);
     float3 h = normalize(-gConst.lightDir.xyz + view);
 
     float NdotL = max(0.f, dot(norm, -gConst.lightDir.xyz));
     float NdotV = max(0.f, dot(norm, view));
     float NdotH = max(0.f, dot(norm, h));
     float LdotH = max(0.f, dot(h, -gConst.lightDir.xyz));
+    float TdotH = dot(tan, h);
 
     //----------- Calculate core shader part DIRECTLY
-    float4 outParams = Disney(NdotL, NdotV, NdotH, LdotH, gConst.roughness);
+    //float4 outParams = Disney(NdotL, NdotV, NdotH, LdotH, gConst.roughness);
+
+    float4 outParams = DisneyKajiyaKay(NdotL, NdotV, NdotH, LdotH,gConst.roughness,TdotH,gConst.anisotropy );
 
     //----------- Calculate final color
     float3 Cdlin = float3(pow(gConst.baseColor[0], 2.2), pow(gConst.baseColor[1], 2.2), pow(gConst.baseColor[2], 2.2));

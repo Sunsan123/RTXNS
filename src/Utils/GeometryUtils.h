@@ -18,6 +18,7 @@ struct Vertex
 {
     dm::float3 position;
     dm::float3 normal;
+    dm::float3 tangent;
 };
 
 std::pair<std::vector<Vertex>, std::vector<uint32_t>> GenerateSphere(float radius, uint32_t segmentsU, uint32_t segmentsV);

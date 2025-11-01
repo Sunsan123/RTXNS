@@ -43,6 +43,9 @@ struct DirectConstantBufferEntry
 
     // Alignment
     float pad = 0;
+
+    // Anisotropy for Kajiya-Kay
+    float anisotropy = 0; 
 };
 
 struct InferenceConstantBufferEntry : DirectConstantBufferEntry

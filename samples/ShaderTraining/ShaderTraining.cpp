@@ -50,6 +50,7 @@ struct UIData
     float specular = 0.5f;
     float roughness = 0.4f;
     float metallic = 0.7f;
+    float anisotropy = 0.0f;
 
     float trainingTime = 0.0f;
     uint32_t epochs = 0;
@@ -119,6 +120,7 @@ public:
         nvrhi::VertexAttributeDesc attributes[] = {
             nvrhi::VertexAttributeDesc().setName("POSITION").setFormat(nvrhi::Format::RGB32_FLOAT).setOffset(0).setBufferIndex(0).setElementStride(sizeof(Vertex)),
             nvrhi::VertexAttributeDesc().setName("NORMAL").setFormat(nvrhi::Format::RGB32_FLOAT).setOffset(0).setBufferIndex(1).setElementStride(sizeof(Vertex)),
+            nvrhi::VertexAttributeDesc().setName("TANGENT").setFormat(nvrhi::Format::RGB32_FLOAT).setOffset(0).setBufferIndex(2).setElementStride(sizeof(Vertex)),
         };
 
         // Initialize direct pass
@@ -485,7 +487,8 @@ public:
                                                        float4(.82f, .67f, .16f, 1.f),
                                                        m_userInterfaceParameters->specular,
                                                        m_userInterfaceParameters->roughness,
-                                                       m_userInterfaceParameters->metallic };
+                                                       m_userInterfaceParameters->metallic,
+                                                       m_userInterfaceParameters->anisotropy };
         directModelConstant.view = affineToHomogeneous(translation(-directModelConstant.cameraPos.xyz()) * lookatZ(-viewDir.xyz(), cameraUp));
         directModelConstant.viewProject = directModelConstant.view * perspProjD3DStyle(radians(67.4f), float(width) / float(height), 0.1f, 10.f);
 
@@ -608,6 +611,7 @@ public:
             state.vertexBuffers = {
                 { m_vertexBuffer, 0, offsetof(Vertex, position) },
                 { m_vertexBuffer, 1, offsetof(Vertex, normal) },
+                { m_vertexBuffer, 2, offsetof(Vertex, tangent) },
             };
             state.pipeline = pass.pipeline;
             state.framebuffer = framebuffer;
@@ -734,6 +738,7 @@ public:
         ImGui::SliderFloat("Specular", &m_userInterfaceParameters->specular, 0.f, 1.f);
         ImGui::SliderFloat("Roughness", &m_userInterfaceParameters->roughness, 0.3f, 1.f);
         ImGui::SliderFloat("Metallic", &m_userInterfaceParameters->metallic, 0.f, 1.f);
+        ImGui::SliderFloat("Anisotropy", &m_userInterfaceParameters->anisotropy, 0.f, 1.f);
 
         ImGui::Text("Epochs : %d", m_userInterfaceParameters->epochs);
         ImGui::Text("Training Time : %.2f s", m_userInterfaceParameters->trainingTime);
