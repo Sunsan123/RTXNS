@@ -10,7 +10,33 @@
 
 //----------- Core part of the shader
 
+#include "NetworkConfig.h"
+
 const static float PI = 3.14159265358979323846;
+
+struct BrdfInputs
+{
+    float NdotL;
+    float NdotV;
+    float NdotH;
+    float LdotH;
+    float roughness;
+    float TdotH;
+    float anisotropy;
+};
+
+BrdfInputs MakeBrdfInputs(float NdotL, float NdotV, float NdotH, float LdotH, float roughness, float TdotH, float anisotropy)
+{
+    BrdfInputs inputs;
+    inputs.NdotL = NdotL;
+    inputs.NdotV = NdotV;
+    inputs.NdotH = NdotH;
+    inputs.LdotH = LdotH;
+    inputs.roughness = roughness;
+    inputs.TdotH = TdotH;
+    inputs.anisotropy = anisotropy;
+    return inputs;
+}
 
 float SchlickFresnel(float u)
 {
@@ -151,4 +177,29 @@ float4 DisneyKajiyaKay(
     // z: 高光 F 项
     // w: 透明涂层项
     return float4((1 / PI) * ss, Gs * Ds, FH, .25 * Gr * Fr * Dr);
+}
+
+float4 EvaluateDisneyBrdf(BrdfInputs inputs)
+{
+    return Disney(inputs.NdotL, inputs.NdotV, inputs.NdotH, inputs.LdotH, inputs.roughness);
+}
+
+float4 EvaluateDisneyKajiyaKayBrdf(BrdfInputs inputs)
+{
+    return DisneyKajiyaKay(
+        inputs.NdotL, inputs.NdotV, inputs.NdotH, inputs.LdotH, inputs.roughness, inputs.TdotH, inputs.anisotropy);
+}
+
+float4 EvaluateBrdf(BrdfTypeValue brdfType, BrdfInputs inputs)
+{
+    // Register new BRDF implementations here so they can be toggled from the UI.
+    switch (brdfType)
+    {
+    case BRDF_TYPE_DISNEY:
+        return EvaluateDisneyBrdf(inputs);
+    case BRDF_TYPE_DISNEY_KAJIYA_KAY:
+        return EvaluateDisneyKajiyaKayBrdf(inputs);
+    default:
+        return EvaluateDisneyKajiyaKayBrdf(inputs);
+    }
 }
