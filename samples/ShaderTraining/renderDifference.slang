@@ -69,7 +69,8 @@ void main_ps(
     float TdotH = dot(tan, h);
 
     //----------- Calculate core shader part DIRECTLY
-    float4 actualDisney = DisneyKajiyaKay(NdotL, NdotV, NdotH, LdotH, gConst.roughness, TdotH, gConst.anisotropy);
+    BrdfInputs groundTruthInputs = MakeBrdfInputs(NdotL, NdotV, NdotH, LdotH, gConst.roughness, TdotH, gConst.anisotropy);
+    float4 actualDisney = EvaluateBrdf(gConst.brdfType, groundTruthInputs);
 
     // Calculate approximated core shader
     float4 outParams = DisneyMLP<NUM_HIDDEN_LAYERS, HIDDEN_NEURONS>(

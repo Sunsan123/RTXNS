@@ -64,7 +64,8 @@ void main_cs(uint3 dispatchThreadID : SV_DispatchThreadID)
     float TdotH = dot(T, H);
     float anisotropy = rng.nextFloat();
 
-    float4 actualDisney = DisneyKajiyaKay(NdotL, NdotV, NdotH, LdotH, roughness, TdotH, anisotropy);
+    BrdfInputs trainingInputs = MakeBrdfInputs(NdotL, NdotV, NdotH, LdotH, roughness, TdotH, anisotropy);
+    float4 actualDisney = EvaluateBrdf(gConst.brdfType, trainingInputs);
 
     //----------- Training step
     float params[INPUT_FEATURES] = { NdotL, NdotV, NdotH, LdotH, roughness, TdotH, anisotropy };
