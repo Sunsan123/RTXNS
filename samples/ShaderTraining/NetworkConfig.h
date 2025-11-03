@@ -8,7 +8,7 @@
  * license agreement from NVIDIA CORPORATION is strictly prohibited.
  */
 
-#define INPUT_FEATURES 5
+#define INPUT_FEATURES 7
 #define INPUT_NEURONS (INPUT_FEATURES * 6) // 6* from Frequency Encoding
 #define OUTPUT_NEURONS 4
 
@@ -40,12 +40,8 @@ struct DirectConstantBufferEntry
     float specular = 0;
     float roughness = 0;
     float metallic = 0;
-
-    // Alignment
-    float pad = 0;
-
-    // Anisotropy for Kajiya-Kay
-    float anisotropy = 0; 
+    float anisotropy = 0;
+    float2 pad = float2(0, 0);
 };
 
 struct InferenceConstantBufferEntry : DirectConstantBufferEntry

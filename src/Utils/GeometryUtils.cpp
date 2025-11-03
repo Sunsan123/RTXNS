@@ -25,8 +25,22 @@ std::pair<std::vector<Vertex>, std::vector<uint32_t>> GenerateSphere(float radiu
             float2 uv = float2(u / float(segmentsU), v / float(segmentsV));
             float theta = uv.x * 2.f * PI_f;
             float phi = uv.y * PI_f;
-            float3 dir = float3(std::cos(theta) * std::sin(phi), std::cos(phi), std::sin(theta) * std::sin(phi));
-            vs.push_back({ dir * radius, dir });
+            float sinPhi = std::sin(phi);
+            float cosPhi = std::cos(phi);
+            float sinTheta = std::sin(theta);
+            float cosTheta = std::cos(theta);
+
+            float3 dir = float3(cosTheta * sinPhi, cosPhi, sinTheta * sinPhi);
+
+            float3 tangent = float3(-sinTheta * sinPhi, 0.f, cosTheta * sinPhi);
+            if (lengthSq(tangent) < 1e-6f)
+            {
+                // At the poles sin(phi) -> 0 and the derivative degenerates. Use an arbitrary tangent.
+                tangent = float3(1.f, 0.f, 0.f);
+            }
+            tangent = normalize(tangent);
+
+            vs.push_back({ dir * radius, dir, tangent });
         }
     }
 
