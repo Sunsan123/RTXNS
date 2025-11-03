@@ -27,7 +27,7 @@ float4 DisneyMLP<let HIDDEN_LAYERS : int, let HIDDEN_NEURONS : int>(
     uint weightOffsets[HIDDEN_LAYERS+1], uint biasOffsets[HIDDEN_LAYERS+1])
 {
     // Calculate approximated core shader part using MLP
-    float params[INPUT_FEATURES] = { NdotL, NdotV, NdotH, LdotH, roughness, TdotH, anisotropy };
+    float params[INPUT_FEATURES] = { NdotL, NdotV, NdotH, LdotH, roughness, TdotH, clamp(anisotropy, -0.99f, 0.99f) };
 
     var inputParams = rtxns::EncodeFrequency<half, INPUT_FEATURES>(params);
 

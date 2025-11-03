@@ -60,9 +60,17 @@ void main_cs(uint3 dispatchThreadID : SV_DispatchThreadID)
     float roughness = rng.nextFloat()*0.7f+0.3f;
 
     //----------- Calculate core shader part DIRECTLY
-    float3 T = float3(1.f, 0.f, 0.f);
+    // Sample a random tangent direction around the surface normal so that the
+    // training data matches the anisotropic distribution used at inference time.
+    float tangentAngle = 2.f * PI * rng.nextFloat();
+    float st, ct;
+    sincos(tangentAngle, st, ct);
+    float3 T = float3(ct, st, 0.f);
     float TdotH = dot(T, H);
-    float anisotropy = rng.nextFloat();
+
+    // Clamp anisotropy into the physically valid range and keep the training
+    // distribution consistent with the runtime slider ([-0.99, 0.99]).
+    float anisotropy = lerp(-0.99f, 0.99f, rng.nextFloat());
 
     float4 actualDisney = DisneyKajiyaKay(NdotL, NdotV, NdotH, LdotH, roughness, TdotH, anisotropy);
 

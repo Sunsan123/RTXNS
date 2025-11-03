@@ -58,10 +58,11 @@ void main_ps(
     float NdotH = max(0.f, dot(norm, h));
     float LdotH = max(0.f, dot(h, -gConst.lightDir.xyz));
     float TdotH = dot(tan, h);
+    float anisotropy = clamp(gConst.anisotropy, -0.99f, 0.99f);
 
     // Calculate approximated core shader
     float4 outParams = DisneyMLP<NUM_HIDDEN_LAYERS, HIDDEN_NEURONS>(
-        NdotL, NdotV, NdotH, LdotH, gConst.roughness, TdotH, gConst.anisotropy,
+        NdotL, NdotV, NdotH, LdotH, gConst.roughness, TdotH, anisotropy,
         gMLPParams,
         rtxns::UnpackArray<NUM_TRANSITIONS_ALIGN4, NUM_TRANSITIONS>(gConst.weightOffsets),
         rtxns::UnpackArray<NUM_TRANSITIONS_ALIGN4, NUM_TRANSITIONS>(gConst.biasOffsets)

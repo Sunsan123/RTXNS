@@ -106,6 +106,8 @@ float4 DisneyKajiyaKay(
     float TdotH,
     float anisotropy)
 {
+    anisotropy = clamp(anisotropy, -0.99f, 0.99f);
+
     // --- 1. 漫反射 & 次表面散射 (不变) ---
     float FL = SchlickFresnel(NdotL), FV = SchlickFresnel(NdotV);
     float Fss90 = LdotH * LdotH * roughness;

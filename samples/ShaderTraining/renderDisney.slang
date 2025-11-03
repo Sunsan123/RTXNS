@@ -52,11 +52,12 @@ void main_ps(
     float NdotH = max(0.f, dot(norm, h));
     float LdotH = max(0.f, dot(h, -gConst.lightDir.xyz));
     float TdotH = dot(tan, h);
+    float anisotropy = clamp(gConst.anisotropy, -0.99f, 0.99f);
 
     //----------- Calculate core shader part DIRECTLY
     //float4 outParams = Disney(NdotL, NdotV, NdotH, LdotH, gConst.roughness);
 
-    float4 outParams = DisneyKajiyaKay(NdotL, NdotV, NdotH, LdotH,gConst.roughness,TdotH,gConst.anisotropy );
+    float4 outParams = DisneyKajiyaKay(NdotL, NdotV, NdotH, LdotH, gConst.roughness, TdotH, anisotropy);
 
     //----------- Calculate final color
     float3 Cdlin = float3(pow(gConst.baseColor[0], 2.2), pow(gConst.baseColor[1], 2.2), pow(gConst.baseColor[2], 2.2));
