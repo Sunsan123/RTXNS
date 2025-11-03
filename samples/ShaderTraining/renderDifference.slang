@@ -27,17 +27,20 @@ struct PS_INPUT
     float4 pos : SV_Position;
     float3 norm : NORMAL;
     float3 view : VIEW;
+    float3 tan : TANGENT;
 }
 
 [shader("vertex")]
 void main_vs(
-    float3 i_pos : POSITION, 
-    float3 i_norm : NORMAL, 
+    float3 i_pos : POSITION,
+    float3 i_norm : NORMAL,
+    float3 i_tan : TANGENT,
     out PS_INPUT output)
 {
     output.pos = mul(float4(i_pos, 1), gConst.viewProject);
     output.norm = i_norm;
     output.view = gConst.cameraPos.xyz - i_pos;
+    output.tan = i_tan;
 }
 
 float3 calcColor(float4 params)
@@ -56,19 +59,21 @@ void main_ps(
     // Prepare input parameters
     float3 view = normalize(input.view);
     float3 norm = normalize(input.norm);
+    float3 tan = normalize(input.tan);
     float3 h = normalize(-gConst.lightDir.xyz + view);
 
     float NdotL = max(0.f, dot(norm, -gConst.lightDir.xyz));
     float NdotV = max(0.f, dot(norm, view));
     float NdotH = max(0.f, dot(norm, h));
     float LdotH = max(0.f, dot(h, -gConst.lightDir.xyz));
+    float TdotH = dot(tan, h);
 
     //----------- Calculate core shader part DIRECTLY
-    float4 actualDisney = Disney(NdotL, NdotV, NdotH, LdotH, gConst.roughness);
+    float4 actualDisney = DisneyKajiyaKay(NdotL, NdotV, NdotH, LdotH, gConst.roughness, TdotH, gConst.anisotropy);
 
     // Calculate approximated core shader
     float4 outParams = DisneyMLP<NUM_HIDDEN_LAYERS, HIDDEN_NEURONS>(
-        NdotL, NdotV, NdotH, LdotH, gConst.roughness,
+        NdotL, NdotV, NdotH, LdotH, gConst.roughness, TdotH, gConst.anisotropy,
         gMLPParams,
         rtxns::UnpackArray<NUM_TRANSITIONS_ALIGN4, NUM_TRANSITIONS>(gConst.weightOffsets),
         rtxns::UnpackArray<NUM_TRANSITIONS_ALIGN4, NUM_TRANSITIONS>(gConst.biasOffsets)

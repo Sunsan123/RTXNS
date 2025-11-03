@@ -55,10 +55,14 @@ void main_cs(uint3 dispatchThreadID : SV_DispatchThreadID)
     float roughness = rng.nextFloat()*0.7f+0.3f;
 
     //----------- Calculate core shader part DIRECTLY
-    float4 actualDisney = Disney(NdotL, NdotV, NdotH, LdotH, roughness);
+    float3 T = float3(1.f, 0.f, 0.f);
+    float TdotH = dot(T, H);
+    float anisotropy = rng.nextFloat();
+
+    float4 actualDisney = DisneyKajiyaKay(NdotL, NdotV, NdotH, LdotH, roughness, TdotH, anisotropy);
 
     //----------- Training step
-    float params[INPUT_FEATURES] = {NdotL, NdotV, NdotH, LdotH, roughness};
+    float params[INPUT_FEATURES] = { NdotL, NdotV, NdotH, LdotH, roughness, TdotH, anisotropy };
     var inputParams = rtxns::EncodeFrequency<half, INPUT_FEATURES>(params);
 
     var model = rtxns::mlp::TrainingMLP<half, 

@@ -488,7 +488,8 @@ public:
                                                        m_userInterfaceParameters->specular,
                                                        m_userInterfaceParameters->roughness,
                                                        m_userInterfaceParameters->metallic,
-                                                       m_userInterfaceParameters->anisotropy };
+                                                       m_userInterfaceParameters->anisotropy,
+                                                       float2(0.f, 0.f) };
         directModelConstant.view = affineToHomogeneous(translation(-directModelConstant.cameraPos.xyz()) * lookatZ(-viewDir.xyz(), cameraUp));
         directModelConstant.viewProject = directModelConstant.view * perspProjD3DStyle(radians(67.4f), float(width) / float(height), 0.1f, 10.f);
 
