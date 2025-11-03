@@ -51,6 +51,7 @@ struct UIData
     float roughness = 0.4f;
     float metallic = 0.7f;
     float anisotropy = 0.0f;
+    int brdfType = int(BRDF_TYPE_DISNEY_KAJIYA_KAY);
 
     float trainingTime = 0.0f;
     uint32_t epochs = 0;
@@ -489,6 +490,7 @@ public:
                                                        m_userInterfaceParameters->roughness,
                                                        m_userInterfaceParameters->metallic,
                                                        m_userInterfaceParameters->anisotropy,
+                                                       static_cast<BrdfTypeValue>(m_userInterfaceParameters->brdfType),
                                                        float2(0.f, 0.f) };
         directModelConstant.view = affineToHomogeneous(translation(-directModelConstant.cameraPos.xyz()) * lookatZ(-viewDir.xyz(), cameraUp));
         directModelConstant.viewProject = directModelConstant.view * perspProjD3DStyle(radians(67.4f), float(width) / float(height), 0.1f, 10.f);
@@ -515,7 +517,12 @@ public:
             for (int i = 0; i < BATCH_COUNT; ++i)
             {
                 TrainingConstantBufferEntry trainingModelConstant = {
-                    .maxParamSize = m_totalParameterCount, .learningRate = m_learningRate, .currentStep = float(++m_currentOptimizationStep), .batchSize = m_batchSize, .seed = seed
+                    .maxParamSize = m_totalParameterCount,
+                    .learningRate = m_learningRate,
+                    .currentStep = float(++m_currentOptimizationStep),
+                    .batchSize = m_batchSize,
+                    .seed = seed,
+                    .brdfType = static_cast<BrdfTypeValue>(m_userInterfaceParameters->brdfType)
                 };
                 std::ranges::copy(m_weightOffsets, trainingModelConstant.weightOffsets);
                 std::ranges::copy(m_biasOffsets, trainingModelConstant.biasOffsets);
@@ -740,6 +747,12 @@ public:
         ImGui::SliderFloat("Roughness", &m_userInterfaceParameters->roughness, 0.3f, 1.f);
         ImGui::SliderFloat("Metallic", &m_userInterfaceParameters->metallic, 0.f, 1.f);
         ImGui::SliderFloat("Anisotropy", &m_userInterfaceParameters->anisotropy, -50.f, 5.f);
+        const char* brdfOptions[] = { "Disney BRDF", "Disney + Kajiya-Kay BRDF" };
+        int currentBrdf = m_userInterfaceParameters->brdfType;
+        if (ImGui::Combo("BRDF Model", &currentBrdf, brdfOptions, IM_ARRAYSIZE(brdfOptions)))
+        {
+            m_userInterfaceParameters->brdfType = currentBrdf;
+        }
 
         ImGui::Text("Epochs : %d", m_userInterfaceParameters->epochs);
         ImGui::Text("Training Time : %.2f s", m_userInterfaceParameters->trainingTime);

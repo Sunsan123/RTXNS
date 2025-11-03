@@ -54,9 +54,8 @@ void main_ps(
     float TdotH = dot(tan, h);
 
     //----------- Calculate core shader part DIRECTLY
-    //float4 outParams = Disney(NdotL, NdotV, NdotH, LdotH, gConst.roughness);
-
-    float4 outParams = DisneyKajiyaKay(NdotL, NdotV, NdotH, LdotH,gConst.roughness,TdotH,gConst.anisotropy );
+    BrdfInputs brdfInputs = MakeBrdfInputs(NdotL, NdotV, NdotH, LdotH, gConst.roughness, TdotH, gConst.anisotropy);
+    float4 outParams = EvaluateBrdf(gConst.brdfType, brdfInputs);
 
     //----------- Calculate final color
     float3 Cdlin = float3(pow(gConst.baseColor[0], 2.2), pow(gConst.baseColor[1], 2.2), pow(gConst.baseColor[2], 2.2));

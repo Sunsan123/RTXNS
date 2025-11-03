@@ -8,6 +8,17 @@
  * license agreement from NVIDIA CORPORATION is strictly prohibited.
  */
 
+#ifdef __cplusplus
+#include <cstdint>
+using BrdfTypeValue = uint32_t;
+#else
+typedef uint BrdfTypeValue;
+#endif
+
+#define BRDF_TYPE_DISNEY 0u
+#define BRDF_TYPE_DISNEY_KAJIYA_KAY 1u
+// Add additional BRDF identifiers above when introducing new models.
+
 #define INPUT_FEATURES 7
 #define INPUT_NEURONS (INPUT_FEATURES * 6) // 6* from Frequency Encoding
 #define OUTPUT_NEURONS 4
@@ -23,6 +34,14 @@
 #define NUM_TRANSITIONS (NUM_HIDDEN_LAYERS + 1)
 #define NUM_TRANSITIONS_ALIGN4 ((NUM_TRANSITIONS + 3) / 4)
 #define LOSS_SCALE 128.0
+
+#ifdef __cplusplus
+enum class BrdfType : BrdfTypeValue
+{
+    Disney = BRDF_TYPE_DISNEY,
+    DisneyKajiyaKay = BRDF_TYPE_DISNEY_KAJIYA_KAY,
+};
+#endif
 
 struct DirectConstantBufferEntry
 {
@@ -41,6 +60,7 @@ struct DirectConstantBufferEntry
     float roughness = 0;
     float metallic = 0;
     float anisotropy = 0;
+    BrdfTypeValue brdfType = BRDF_TYPE_DISNEY_KAJIYA_KAY;
     float2 pad = float2(0, 0);
 };
 
@@ -60,4 +80,6 @@ struct TrainingConstantBufferEntry
     float currentStep;
     uint32_t batchSize;
     uint64_t seed;
+    BrdfTypeValue brdfType = BRDF_TYPE_DISNEY_KAJIYA_KAY;
+    uint32_t pad = 0;
 };
