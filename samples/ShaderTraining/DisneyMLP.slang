@@ -13,8 +13,8 @@ import CooperativeVectorFunctions;
 import Activation;
 import Utils;
 
-// 5 inputs are passed into this function; NdotL, NdotV, NdotH, LdotH, roughness
-#define INPUT_FEATURES 5 
+// 7 inputs are passed into this function; NdotL, NdotV, NdotH, LdotH, roughness, TdotH, anisotropy
+#define INPUT_FEATURES 7
 
 // The output is float4
 #define OUTPUT_NEURONS 4
@@ -23,11 +23,11 @@ import Utils;
 #define FREQUENCY_EXPANSION 6
 
 float4 DisneyMLP<let HIDDEN_LAYERS : int, let HIDDEN_NEURONS : int>(
-    float NdotL, float NdotV, float NdotH, float LdotH, float roughness, ByteAddressBuffer mlpBuffer,
+    float NdotL, float NdotV, float NdotH, float LdotH, float roughness, float TdotH, float anisotropy, ByteAddressBuffer mlpBuffer,
     uint weightOffsets[HIDDEN_LAYERS+1], uint biasOffsets[HIDDEN_LAYERS+1])
 {
     // Calculate approximated core shader part using MLP
-    float params[INPUT_FEATURES] = { NdotL, NdotV, NdotH, LdotH, roughness };
+    float params[INPUT_FEATURES] = { NdotL, NdotV, NdotH, LdotH, roughness, TdotH, anisotropy };
 
     var inputParams = rtxns::EncodeFrequency<half, INPUT_FEATURES>(params);
 

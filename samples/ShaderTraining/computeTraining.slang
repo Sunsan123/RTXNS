@@ -33,10 +33,15 @@ void main_cs(uint3 dispatchThreadID : SV_DispatchThreadID)
     PCG32 rng = PCG32(gConst.seed, idx);
 
     // Using tangent coordinate system. N = (0,0,1)
-    // L is arbitrary, but (N,L) >= 0 => L.z > 0, so generate random L in XZ plane's first quadrant
+    // Generate a random light direction over the upper hemisphere so the training data
+    // spans the full tangent frame instead of being confined to the XZ plane.
     float3 L;
-    L.y = 0.f;
-    sincos(rng.nextFloat()*PI/2, L.z, L.x);
+    float lightAzimuth = 2.f * PI * rng.nextFloat();
+    float lightCosTheta = rng.nextFloat();
+    float lightSinTheta = sqrt(max(0.f, 1.f - lightCosTheta * lightCosTheta));
+    float saL, caL;
+    sincos(lightAzimuth, saL, caL);
+    L = float3(lightSinTheta * caL, lightSinTheta * saL, lightCosTheta);
 
     // V is random direction, but (N,V) >= 0 => V.z > 0
     float sa, ca; // Azimuth [-PI/2,PI/2]
@@ -55,10 +60,14 @@ void main_cs(uint3 dispatchThreadID : SV_DispatchThreadID)
     float roughness = rng.nextFloat()*0.7f+0.3f;
 
     //----------- Calculate core shader part DIRECTLY
-    float4 actualDisney = Disney(NdotL, NdotV, NdotH, LdotH, roughness);
+    float3 T = float3(1.f, 0.f, 0.f);
+    float TdotH = dot(T, H);
+    float anisotropy = rng.nextFloat();
+
+    float4 actualDisney = DisneyKajiyaKay(NdotL, NdotV, NdotH, LdotH, roughness, TdotH, anisotropy);
 
     //----------- Training step
-    float params[INPUT_FEATURES] = {NdotL, NdotV, NdotH, LdotH, roughness};
+    float params[INPUT_FEATURES] = { NdotL, NdotV, NdotH, LdotH, roughness, TdotH, anisotropy };
     var inputParams = rtxns::EncodeFrequency<half, INPUT_FEATURES>(params);
 
     var model = rtxns::mlp::TrainingMLP<half, 
