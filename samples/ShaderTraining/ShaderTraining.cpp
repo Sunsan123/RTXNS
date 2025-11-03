@@ -31,6 +31,7 @@
 #include <fstream>
 #include <random>
 #include <numeric>
+#include <algorithm>
 #include <format>
 
 using namespace donut;
@@ -479,6 +480,8 @@ public:
         float4 viewDir(0, 0, -1, 0);
 
         // Fill out the constant buffer slices for multiple views of the model.
+        float clampedAnisotropy = std::clamp(m_userInterfaceParameters->anisotropy, -0.99f, 0.99f);
+
         DirectConstantBufferEntry directModelConstant{ {},
                                                        {},
                                                        { 0, 0, 2, 0 },
@@ -488,7 +491,7 @@ public:
                                                        m_userInterfaceParameters->specular,
                                                        m_userInterfaceParameters->roughness,
                                                        m_userInterfaceParameters->metallic,
-                                                       m_userInterfaceParameters->anisotropy,
+                                                       clampedAnisotropy,
                                                        float2(0.f, 0.f) };
         directModelConstant.view = affineToHomogeneous(translation(-directModelConstant.cameraPos.xyz()) * lookatZ(-viewDir.xyz(), cameraUp));
         directModelConstant.viewProject = directModelConstant.view * perspProjD3DStyle(radians(67.4f), float(width) / float(height), 0.1f, 10.f);
@@ -739,7 +742,7 @@ public:
         ImGui::SliderFloat("Specular", &m_userInterfaceParameters->specular, 0.f, 1.f);
         ImGui::SliderFloat("Roughness", &m_userInterfaceParameters->roughness, 0.3f, 1.f);
         ImGui::SliderFloat("Metallic", &m_userInterfaceParameters->metallic, 0.f, 1.f);
-        ImGui::SliderFloat("Anisotropy", &m_userInterfaceParameters->anisotropy, -50.f, 5.f);
+        ImGui::SliderFloat("Anisotropy", &m_userInterfaceParameters->anisotropy, -0.99f, 0.99f);
 
         ImGui::Text("Epochs : %d", m_userInterfaceParameters->epochs);
         ImGui::Text("Training Time : %.2f s", m_userInterfaceParameters->trainingTime);
