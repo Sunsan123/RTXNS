@@ -739,7 +739,7 @@ public:
         ImGui::SliderFloat("Specular", &m_userInterfaceParameters->specular, 0.f, 1.f);
         ImGui::SliderFloat("Roughness", &m_userInterfaceParameters->roughness, 0.3f, 1.f);
         ImGui::SliderFloat("Metallic", &m_userInterfaceParameters->metallic, 0.f, 1.f);
-        ImGui::SliderFloat("Anisotropy", &m_userInterfaceParameters->anisotropy, 0.f, 1.f);
+        ImGui::SliderFloat("Anisotropy", &m_userInterfaceParameters->anisotropy, -50.f, 5.f);
 
         ImGui::Text("Epochs : %d", m_userInterfaceParameters->epochs);
         ImGui::Text("Training Time : %.2f s", m_userInterfaceParameters->trainingTime);

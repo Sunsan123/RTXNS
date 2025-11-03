@@ -12,6 +12,11 @@
 
 using namespace dm;
 
+inline float lengthSq(const float3& v)
+{
+    return v.x * v.x + v.y * v.y + v.z * v.z;
+}
+
 std::pair<std::vector<Vertex>, std::vector<uint32_t>> GenerateSphere(float radius, uint32_t segmentsU, uint32_t segmentsV)
 {
     std::vector<Vertex> vs;
