@@ -13,8 +13,11 @@ import CooperativeVectorFunctions;
 import Activation;
 import Utils;
 
-// 7 inputs are passed into this function; NdotL, NdotV, NdotH, LdotH, roughness, TdotH, anisotropy
-#define INPUT_FEATURES 7
+// Original model uses 5 inputs: NdotL, NdotV, NdotH, LdotH, roughness.
+#define ORIGINAL_INPUT_FEATURES 5
+
+// Anisotropic model adds TdotH and anisotropy.
+#define ANISOTROPIC_INPUT_FEATURES 7
 
 // The output is float4
 #define OUTPUT_NEURONS 4
@@ -22,18 +25,38 @@ import Utils;
 // EncodeFrequency expands the input by 6 per input feature
 #define FREQUENCY_EXPANSION 6
 
+float4 DisneyMLPOriginal<let HIDDEN_LAYERS : int, let HIDDEN_NEURONS : int>(
+    float NdotL, float NdotV, float NdotH, float LdotH, float roughness, ByteAddressBuffer mlpBuffer,
+    uint weightOffsets[HIDDEN_LAYERS+1], uint biasOffsets[HIDDEN_LAYERS+1])
+{
+    float params[ORIGINAL_INPUT_FEATURES] = { NdotL, NdotV, NdotH, LdotH, roughness };
+    var inputParams = rtxns::EncodeFrequency<half, ORIGINAL_INPUT_FEATURES>(params);
+
+    var model = rtxns::mlp::InferenceMLP<half,
+        HIDDEN_LAYERS,
+        ORIGINAL_INPUT_FEATURES * FREQUENCY_EXPANSION,
+        HIDDEN_NEURONS,
+        OUTPUT_NEURONS,
+        CoopVecMatrixLayout::TrainingOptimal,
+        CoopVecComponentType::Float16>
+        (mlpBuffer, weightOffsets, biasOffsets);
+
+    var outputParams = model.forward(inputParams, rtxns::mlp::ReLUAct<half, HIDDEN_NEURONS>(), rtxns::mlp::ExponentialAct<half, OUTPUT_NEURONS>());
+    return float4(outputParams[0], outputParams[1], outputParams[2], outputParams[3]);
+}
+
 float4 DisneyMLP<let HIDDEN_LAYERS : int, let HIDDEN_NEURONS : int>(
     float NdotL, float NdotV, float NdotH, float LdotH, float roughness, float TdotH, float anisotropy, ByteAddressBuffer mlpBuffer,
     uint weightOffsets[HIDDEN_LAYERS+1], uint biasOffsets[HIDDEN_LAYERS+1])
 {
     // Calculate approximated core shader part using MLP
-    float params[INPUT_FEATURES] = { NdotL, NdotV, NdotH, LdotH, roughness, TdotH, clamp(anisotropy, -0.99f, 0.99f) };
+    float params[ANISOTROPIC_INPUT_FEATURES] = { NdotL, NdotV, NdotH, LdotH, roughness, TdotH, clamp(anisotropy, -0.99f, 0.99f) };
 
-    var inputParams = rtxns::EncodeFrequency<half, INPUT_FEATURES>(params);
+    var inputParams = rtxns::EncodeFrequency<half, ANISOTROPIC_INPUT_FEATURES>(params);
 
     var model = rtxns::mlp::InferenceMLP<half, 
         HIDDEN_LAYERS, 
-        INPUT_FEATURES * FREQUENCY_EXPANSION, 
+        ANISOTROPIC_INPUT_FEATURES * FREQUENCY_EXPANSION,
         HIDDEN_NEURONS, 
         OUTPUT_NEURONS, 
         CoopVecMatrixLayout::TrainingOptimal, 

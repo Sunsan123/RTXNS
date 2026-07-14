@@ -8,11 +8,17 @@
  * license agreement from NVIDIA CORPORATION is strictly prohibited.
  */
 
-#define INPUT_FEATURES 7
-#define INPUT_NEURONS (INPUT_FEATURES * 6) // 6* from Frequency Encoding
+#define ORIGINAL_INPUT_FEATURES 5
+#define ANISOTROPIC_INPUT_FEATURES 7
+#define ORIGINAL_INPUT_NEURONS (ORIGINAL_INPUT_FEATURES * 6) // 6* from Frequency Encoding
+#define ANISOTROPIC_INPUT_NEURONS (ANISOTROPIC_INPUT_FEATURES * 6)
+#define INPUT_FEATURES ANISOTROPIC_INPUT_FEATURES
+#define INPUT_NEURONS ANISOTROPIC_INPUT_NEURONS
 #define OUTPUT_NEURONS 4
 
-#define HIDDEN_NEURONS 32
+#define ORIGINAL_HIDDEN_NEURONS 32
+#define ANISOTROPIC_HIDDEN_NEURONS 32
+#define HIDDEN_NEURONS ANISOTROPIC_HIDDEN_NEURONS
 #define NUM_HIDDEN_LAYERS 3
 #define BATCH_SIZE (1 << 16)
 #define BATCH_COUNT 100
@@ -41,7 +47,10 @@ struct DirectConstantBufferEntry
     float roughness = 0;
     float metallic = 0;
     float anisotropy = 0;
-    float2 pad = float2(0, 0);
+    uint32_t useAnisotropy = 0;
+    float pad0 = 0;
+    float pad1 = 0;
+    float pad2 = 0;
 };
 
 struct InferenceConstantBufferEntry : DirectConstantBufferEntry
@@ -60,4 +69,6 @@ struct TrainingConstantBufferEntry
     float currentStep;
     uint32_t batchSize;
     uint64_t seed;
+    uint32_t useAnisotropy;
+    float pad0;
 };

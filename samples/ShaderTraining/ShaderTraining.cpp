@@ -33,11 +33,21 @@
 #include <numeric>
 #include <algorithm>
 #include <format>
+#include <cstddef>
 
 using namespace donut;
 using namespace donut::math;
 
 #include "NetworkConfig.h"
+
+static_assert(offsetof(DirectConstantBufferEntry, anisotropy) == 204);
+static_assert(offsetof(DirectConstantBufferEntry, useAnisotropy) == 208);
+static_assert(sizeof(DirectConstantBufferEntry) == 224);
+static_assert(offsetof(InferenceConstantBufferEntry, weightOffsets) == 224);
+static_assert(offsetof(InferenceConstantBufferEntry, biasOffsets) == 240);
+static_assert(offsetof(TrainingConstantBufferEntry, seed) == 48);
+static_assert(offsetof(TrainingConstantBufferEntry, useAnisotropy) == 56);
+static_assert(sizeof(TrainingConstantBufferEntry) == 64);
 
 static const char* g_windowTitle = "RTX Neural Shading Example: Shader Training (Ground Truth | Training | Loss )";
 constexpr int g_viewsNum = 3;
@@ -56,6 +66,7 @@ struct UIData
     float trainingTime = 0.0f;
     uint32_t epochs = 0;
 
+    bool useAnisotropy = false;
     bool reset = false;
     bool training = true;
     bool load = false;
@@ -92,6 +103,8 @@ public:
         ////////////////////
         m_networkUtils = std::make_shared<rtxns::NetworkUtilities>(GetDevice());
         m_neuralNetwork = std::make_unique<rtxns::HostNetwork>(m_networkUtils);
+        m_activeUseAnisotropy = m_userInterfaceParameters->useAnisotropy;
+        m_netArch = GetNetworkArchitecture(m_activeUseAnisotropy);
         if (!m_neuralNetwork->Initialise(m_netArch))
         {
             log::error("Failed to create a network.");
@@ -103,8 +116,10 @@ public:
         // Create the shaders/buffers for the Neural Training
         //
         ////////////////////
-        m_trainingPass.computeShader = m_shaderFactory->CreateShader("app/computeTraining", "main_cs", nullptr, nvrhi::ShaderType::Compute);
+        m_trainingShaderAnisotropic = m_shaderFactory->CreateShader("app/computeTraining", "main_cs", nullptr, nvrhi::ShaderType::Compute);
+        m_trainingShaderOriginal = m_shaderFactory->CreateShader("app/computeTrainingOriginal", "main_cs", nullptr, nvrhi::ShaderType::Compute);
         m_optimizerPass.computeShader = m_shaderFactory->CreateShader("app/computeOptimizer", "adam_cs", nullptr, nvrhi::ShaderType::Compute);
+        assert(m_trainingShaderAnisotropic && m_trainingShaderOriginal && m_optimizerPass.computeShader);
 
         m_trainingConstantBuffer = GetDevice()->createBuffer(nvrhi::utils::CreateStaticConstantBufferDesc(sizeof(TrainingConstantBufferEntry), "TrainingConstantBuffer")
                                                                  .setInitialState(nvrhi::ResourceStates::ConstantBuffer)
@@ -130,8 +145,9 @@ public:
                                                                         .setInitialState(nvrhi::ResourceStates::ConstantBuffer)
                                                                         .setKeepInitialState(true));
             m_directPass.vertexShader = m_shaderFactory->CreateShader("app/renderDisney", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
-            m_directPass.pixelShader = m_shaderFactory->CreateShader("app/renderDisney", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
-            assert(m_directPass.vertexShader && m_directPass.pixelShader);
+            m_directPixelShaderAnisotropic = m_shaderFactory->CreateShader("app/renderDisney", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
+            m_directPixelShaderOriginal = m_shaderFactory->CreateShader("app/renderDisneyOriginal", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
+            assert(m_directPass.vertexShader && m_directPixelShaderAnisotropic && m_directPixelShaderOriginal);
 
             m_directPass.inputLayout = GetDevice()->createInputLayout(attributes, uint32_t(std::size(attributes)), m_directPass.vertexShader);
         }
@@ -142,8 +158,9 @@ public:
                                                                            .setInitialState(nvrhi::ResourceStates::ConstantBuffer)
                                                                            .setKeepInitialState(true));
             m_inferencePass.vertexShader = m_shaderFactory->CreateShader("app/renderInference", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
-            m_inferencePass.pixelShader = m_shaderFactory->CreateShader("app/renderInference", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
-            assert(m_inferencePass.vertexShader && m_inferencePass.pixelShader);
+            m_inferencePixelShaderAnisotropic = m_shaderFactory->CreateShader("app/renderInference", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
+            m_inferencePixelShaderOriginal = m_shaderFactory->CreateShader("app/renderInferenceOriginal", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
+            assert(m_inferencePass.vertexShader && m_inferencePixelShaderAnisotropic && m_inferencePixelShaderOriginal);
 
             m_inferencePass.inputLayout = GetDevice()->createInputLayout(attributes, uint32_t(std::size(attributes)), m_inferencePass.vertexShader);
         }
@@ -152,8 +169,9 @@ public:
         {
             m_differencePass.constantBuffer = m_inferencePass.constantBuffer;
             m_differencePass.vertexShader = m_shaderFactory->CreateShader("app/renderDifference", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
-            m_differencePass.pixelShader = m_shaderFactory->CreateShader("app/renderDifference", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
-            assert(m_differencePass.vertexShader && m_differencePass.pixelShader);
+            m_differencePixelShaderAnisotropic = m_shaderFactory->CreateShader("app/renderDifference", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
+            m_differencePixelShaderOriginal = m_shaderFactory->CreateShader("app/renderDifferenceOriginal", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
+            assert(m_differencePass.vertexShader && m_differencePixelShaderAnisotropic && m_differencePixelShaderOriginal);
 
             m_differencePass.inputLayout = GetDevice()->createInputLayout(attributes, uint32_t(std::size(attributes)), m_differencePass.vertexShader);
         }
@@ -196,6 +214,7 @@ public:
             nvrhi::utils::CreateBindingSetAndLayout(GetDevice(), nvrhi::ShaderType::All, 0, bindingSetDesc, m_directPass.bindingLayout, m_directPass.bindingSet);
         }
 
+        SetActiveModeShaders(m_activeUseAnisotropy);
         CreateMLPBuffers();
 
         m_disneyTimer = GetDevice()->createTimerQuery();
@@ -426,14 +445,20 @@ public:
         ////////////////////
         if (m_userInterfaceParameters->reset)
         {
+            const bool requestedUseAnisotropy = m_userInterfaceParameters->useAnisotropy;
+            const auto requestedNetArch = GetNetworkArchitecture(requestedUseAnisotropy);
             m_neuralNetwork = std::make_unique<rtxns::HostNetwork>(m_networkUtils);
-            if (m_neuralNetwork->Initialise(m_netArch))
+            if (m_neuralNetwork->Initialise(requestedNetArch))
             {
+                m_activeUseAnisotropy = requestedUseAnisotropy;
+                m_netArch = requestedNetArch;
+                SetActiveModeShaders(m_activeUseAnisotropy);
                 CreateMLPBuffers();
             }
             else
             {
                 log::error("Failed to create a network.");
+                m_userInterfaceParameters->useAnisotropy = m_activeUseAnisotropy;
             }
 
             m_userInterfaceParameters->reset = false;
@@ -444,8 +469,23 @@ public:
             if (m_userInterfaceParameters->load)
             {
                 m_neuralNetwork = std::make_unique<rtxns::HostNetwork>(m_networkUtils);
-                m_neuralNetwork->InitialiseFromFile(m_userInterfaceParameters->fileName);
-                CreateMLPBuffers();
+                if (m_neuralNetwork->InitialiseFromFile(m_userInterfaceParameters->fileName))
+                {
+                    const auto& loadedNetArch = m_neuralNetwork->GetNetworkArchitecture();
+                    if (IsKnownNetworkArchitecture(loadedNetArch))
+                    {
+                        m_activeUseAnisotropy = loadedNetArch.inputNeurons == ANISOTROPIC_INPUT_NEURONS;
+                        m_userInterfaceParameters->useAnisotropy = m_activeUseAnisotropy;
+                        m_netArch = loadedNetArch;
+                        SetActiveModeShaders(m_activeUseAnisotropy);
+                        CreateMLPBuffers();
+                    }
+                    else
+                    {
+                        log::error("Loaded network architecture does not match Original or Anisotropic ShaderTraining modes.");
+                        m_userInterfaceParameters->useAnisotropy = m_activeUseAnisotropy;
+                    }
+                }
             }
             else
             {
@@ -480,6 +520,7 @@ public:
         float4 viewDir(0, 0, -1, 0);
 
         // Fill out the constant buffer slices for multiple views of the model.
+        bool useAnisotropy = m_activeUseAnisotropy;
         float clampedAnisotropy = std::clamp(m_userInterfaceParameters->anisotropy, -0.99f, 0.99f);
 
         DirectConstantBufferEntry directModelConstant{ {},
@@ -492,7 +533,10 @@ public:
                                                        m_userInterfaceParameters->roughness,
                                                        m_userInterfaceParameters->metallic,
                                                        clampedAnisotropy,
-                                                       float2(0.f, 0.f) };
+                                                       useAnisotropy ? 1u : 0u,
+                                                       0.f,
+                                                       0.f,
+                                                       0.f };
         directModelConstant.view = affineToHomogeneous(translation(-directModelConstant.cameraPos.xyz()) * lookatZ(-viewDir.xyz(), cameraUp));
         directModelConstant.viewProject = directModelConstant.view * perspProjD3DStyle(radians(67.4f), float(width) / float(height), 0.1f, 10.f);
 
@@ -518,7 +562,13 @@ public:
             for (int i = 0; i < BATCH_COUNT; ++i)
             {
                 TrainingConstantBufferEntry trainingModelConstant = {
-                    .maxParamSize = m_totalParameterCount, .learningRate = m_learningRate, .currentStep = float(++m_currentOptimizationStep), .batchSize = m_batchSize, .seed = seed
+                    .maxParamSize = m_totalParameterCount,
+                    .learningRate = m_learningRate,
+                    .currentStep = float(++m_currentOptimizationStep),
+                    .batchSize = m_batchSize,
+                    .seed = seed,
+                    .useAnisotropy = useAnisotropy ? 1u : 0u,
+                    .pad0 = 0.f
                 };
                 std::ranges::copy(m_weightOffsets, trainingModelConstant.weightOffsets);
                 std::ranges::copy(m_biasOffsets, trainingModelConstant.biasOffsets);
@@ -645,6 +695,50 @@ public:
         GetDevice()->executeCommandList(m_commandList);
     }
 
+    rtxns::NetworkArchitecture GetNetworkArchitecture(bool useAnisotropy) const
+    {
+        return {
+            .numHiddenLayers = NUM_HIDDEN_LAYERS,
+            .inputNeurons = uint32_t(useAnisotropy ? ANISOTROPIC_INPUT_NEURONS : ORIGINAL_INPUT_NEURONS),
+            .hiddenNeurons = uint32_t(useAnisotropy ? ANISOTROPIC_HIDDEN_NEURONS : ORIGINAL_HIDDEN_NEURONS),
+            .outputNeurons = OUTPUT_NEURONS,
+            .weightPrecision = rtxns::Precision::F16,
+            .biasPrecision = rtxns::Precision::F16,
+        };
+    }
+
+    bool IsKnownNetworkArchitecture(const rtxns::NetworkArchitecture& netArch) const
+    {
+        const bool commonSettingsMatch =
+            netArch.numHiddenLayers == NUM_HIDDEN_LAYERS &&
+            netArch.outputNeurons == OUTPUT_NEURONS &&
+            netArch.weightPrecision == rtxns::Precision::F16 &&
+            netArch.biasPrecision == rtxns::Precision::F16;
+
+        const bool originalSettingsMatch =
+            netArch.inputNeurons == ORIGINAL_INPUT_NEURONS &&
+            netArch.hiddenNeurons == ORIGINAL_HIDDEN_NEURONS;
+
+        const bool anisotropicSettingsMatch =
+            netArch.inputNeurons == ANISOTROPIC_INPUT_NEURONS &&
+            netArch.hiddenNeurons == ANISOTROPIC_HIDDEN_NEURONS;
+
+        return commonSettingsMatch && (originalSettingsMatch || anisotropicSettingsMatch);
+    }
+
+    void SetActiveModeShaders(bool useAnisotropy)
+    {
+        m_trainingPass.computeShader = useAnisotropy ? m_trainingShaderAnisotropic : m_trainingShaderOriginal;
+        m_directPass.pixelShader = useAnisotropy ? m_directPixelShaderAnisotropic : m_directPixelShaderOriginal;
+        m_inferencePass.pixelShader = useAnisotropy ? m_inferencePixelShaderAnisotropic : m_inferencePixelShaderOriginal;
+        m_differencePass.pixelShader = useAnisotropy ? m_differencePixelShaderAnisotropic : m_differencePixelShaderOriginal;
+
+        m_trainingPass.pipeline = nullptr;
+        m_directPass.pipeline = nullptr;
+        m_inferencePass.pipeline = nullptr;
+        m_differencePass.pipeline = nullptr;
+    }
+
 private:
     std::string m_extraStatus;
     nvrhi::TimerQueryHandle m_disneyTimer;
@@ -655,6 +749,15 @@ private:
     std::shared_ptr<engine::ShaderFactory> m_shaderFactory;
     std::shared_ptr<engine::CommonRenderPasses> m_commonPasses;
     std::unique_ptr<engine::BindingCache> m_bindingCache;
+
+    nvrhi::ShaderHandle m_trainingShaderOriginal;
+    nvrhi::ShaderHandle m_trainingShaderAnisotropic;
+    nvrhi::ShaderHandle m_directPixelShaderOriginal;
+    nvrhi::ShaderHandle m_directPixelShaderAnisotropic;
+    nvrhi::ShaderHandle m_inferencePixelShaderOriginal;
+    nvrhi::ShaderHandle m_inferencePixelShaderAnisotropic;
+    nvrhi::ShaderHandle m_differencePixelShaderOriginal;
+    nvrhi::ShaderHandle m_differencePixelShaderAnisotropic;
 
     struct RenderPass
     {
@@ -710,6 +813,7 @@ private:
     uint4 m_biasOffsets[NUM_TRANSITIONS_ALIGN4];
 
     UIData* m_userInterfaceParameters;
+    bool m_activeUseAnisotropy = false;
 
     std::shared_ptr<rtxns::NetworkUtilities> m_networkUtils;
     std::unique_ptr<rtxns::HostNetwork> m_neuralNetwork;
@@ -717,8 +821,8 @@ private:
 
     rtxns::NetworkArchitecture m_netArch = {
         .numHiddenLayers = NUM_HIDDEN_LAYERS,
-        .inputNeurons = INPUT_NEURONS,
-        .hiddenNeurons = HIDDEN_NEURONS,
+        .inputNeurons = ORIGINAL_INPUT_NEURONS,
+        .hiddenNeurons = ORIGINAL_HIDDEN_NEURONS,
         .outputNeurons = OUTPUT_NEURONS,
         .weightPrecision = rtxns::Precision::F16,
         .biasPrecision = rtxns::Precision::F16,
@@ -742,7 +846,15 @@ public:
         ImGui::SliderFloat("Specular", &m_userInterfaceParameters->specular, 0.f, 1.f);
         ImGui::SliderFloat("Roughness", &m_userInterfaceParameters->roughness, 0.3f, 1.f);
         ImGui::SliderFloat("Metallic", &m_userInterfaceParameters->metallic, 0.f, 1.f);
-        ImGui::SliderFloat("Anisotropy", &m_userInterfaceParameters->anisotropy, -0.99f, 0.99f);
+        if (ImGui::Checkbox("Anisotropic Kajiya-Kay", &m_userInterfaceParameters->useAnisotropy))
+        {
+            m_userInterfaceParameters->reset = true;
+        }
+
+        if (m_userInterfaceParameters->useAnisotropy)
+        {
+            ImGui::SliderFloat("Anisotropy", &m_userInterfaceParameters->anisotropy, -0.99f, 0.99f);
+        }
 
         ImGui::Text("Epochs : %d", m_userInterfaceParameters->epochs);
         ImGui::Text("Training Time : %.2f s", m_userInterfaceParameters->trainingTime);
