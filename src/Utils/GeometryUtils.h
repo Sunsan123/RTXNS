@@ -12,6 +12,7 @@
 
 #include <donut/core/math/math.h>
 
+#include <filesystem>
 #include <vector>
 
 struct Vertex
@@ -19,6 +20,8 @@ struct Vertex
     dm::float3 position;
     dm::float3 normal;
     dm::float3 tangent;
+    dm::float2 texcoord;
 };
 
 std::pair<std::vector<Vertex>, std::vector<uint32_t>> GenerateSphere(float radius, uint32_t segmentsU, uint32_t segmentsV);
+std::pair<std::vector<Vertex>, std::vector<uint32_t>> LoadObjModel(const std::filesystem::path& fileName, float targetMaxExtent = 2.f);

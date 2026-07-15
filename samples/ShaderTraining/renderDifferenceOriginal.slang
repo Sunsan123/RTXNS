@@ -18,9 +18,17 @@ import Activation;
 import MLP;
 import Disney;
 import DisneyMLP;
+import IBL;
+import PBRTextures;
 
 DECLARE_CBUFFER(InferenceConstantBufferEntry, gConst, 0, 0);
 ByteAddressBuffer gMLPParams : REGISTER_SRV(0, 0);
+Texture2D<float4> gEnvironmentMap : REGISTER_SRV(1, 0);
+Texture2D<float4> gBaseColorMap : REGISTER_SRV(2, 0);
+Texture2D<float4> gRoughnessMap : REGISTER_SRV(3, 0);
+Texture2D<float4> gMetallicMap : REGISTER_SRV(4, 0);
+Texture2D<float4> gNormalMap : REGISTER_SRV(5, 0);
+SamplerState gEnvironmentSampler : REGISTER_SAMPLER(0, 0);
 
 struct PS_INPUT
 {
@@ -28,14 +36,17 @@ struct PS_INPUT
     float3 norm : NORMAL;
     float3 view : VIEW;
     float3 tan : TANGENT;
+    float2 uv : TEXCOORD;
 }
 
-float3 calcColor(float4 params)
+float3 calcColor(float4 params, float3 norm, float3 view, float3 baseColor, float roughness, float metallic)
 {
-    float3 Cdlin = pow(gConst.baseColor.rgb, 2.2);
-    float3 Cspec0 = lerp(gConst.specular * float3(.08f), Cdlin, gConst.metallic);
-    float3 brdfn = params.x * Cdlin * (1 - gConst.metallic) + params.y * lerp(Cspec0, float3(1), params.z) + params.w;
-    return clamp(brdfn * gConst.lightIntensity.rgb, 0, 1);
+    float3 Cdlin = baseColor;
+    float3 Cspec0 = lerp(gConst.specular * float3(.08f), Cdlin, metallic);
+    float3 brdfn = params.x * Cdlin * (1 - metallic) + params.y * lerp(Cspec0, float3(1), params.z) + params.w;
+    float3 colorh = brdfn * gConst.lightIntensity.rgb;
+    colorh = AddImageBasedLighting(gEnvironmentMap, gEnvironmentSampler, colorh, Cdlin, Cspec0, metallic, roughness, norm, view, gConst.iblSettings);
+    return clamp(colorh, 0, 1);
 }
 
 [shader("fragment")]
@@ -45,7 +56,19 @@ void main_ps(
 {
     // Prepare input parameters
     float3 view = normalize(input.view);
-    float3 norm = normalize(input.norm);
+    PbrMaterialSample material = SamplePbrMaterial(
+        gBaseColorMap,
+        gRoughnessMap,
+        gMetallicMap,
+        gNormalMap,
+        gEnvironmentSampler,
+        input.uv,
+        input.norm,
+        input.tan,
+        gConst.baseColor,
+        gConst.roughness,
+        gConst.metallic);
+    float3 norm = material.normal;
     float3 h = normalize(-gConst.lightDir.xyz + view);
 
     float NdotL = max(0.f, dot(norm, -gConst.lightDir.xyz));
@@ -54,15 +77,16 @@ void main_ps(
     float LdotH = max(0.f, dot(h, -gConst.lightDir.xyz));
 
     //----------- Calculate core shader part DIRECTLY
-    float4 actualDisney = Disney(NdotL, NdotV, NdotH, LdotH, gConst.roughness);
+    float4 actualDisney = Disney(NdotL, NdotV, NdotH, LdotH, material.roughness);
 
     // Calculate approximated core shader
     float4 outParams = DisneyMLPOriginal<NUM_HIDDEN_LAYERS, ORIGINAL_HIDDEN_NEURONS>(
-        NdotL, NdotV, NdotH, LdotH, gConst.roughness,
+        NdotL, NdotV, NdotH, LdotH, material.roughness,
         gMLPParams,
         rtxns::UnpackArray<NUM_TRANSITIONS_ALIGN4, NUM_TRANSITIONS>(gConst.weightOffsets),
         rtxns::UnpackArray<NUM_TRANSITIONS_ALIGN4, NUM_TRANSITIONS>(gConst.biasOffsets)
     );
 
-    o_color = float4((calcColor(actualDisney) - calcColor(outParams)) * NdotL * 4 + 0.5, 1.f);
+    o_color = float4((calcColor(actualDisney, norm, view, material.baseColor, material.roughness, material.metallic) -
+                      calcColor(outParams, norm, view, material.baseColor, material.roughness, material.metallic)) * NdotL * 4 + 0.5, 1.f);
 }

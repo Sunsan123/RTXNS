@@ -26,25 +26,30 @@
 #include "GeometryUtils.h"
 #include "NeuralNetwork.h"
 #include "Float16.h"
+#include "DirectoryHelper.h"
+#include "PbrTextureUtils.h"
 
 #include <iostream>
 #include <fstream>
 #include <random>
 #include <numeric>
 #include <algorithm>
+#include <cmath>
 #include <format>
 #include <cstddef>
+#include <utility>
+#include <vector>
 
 using namespace donut;
 using namespace donut::math;
 
 #include "NetworkConfig.h"
 
-static_assert(offsetof(DirectConstantBufferEntry, anisotropy) == 204);
-static_assert(offsetof(DirectConstantBufferEntry, useAnisotropy) == 208);
-static_assert(sizeof(DirectConstantBufferEntry) == 224);
-static_assert(offsetof(InferenceConstantBufferEntry, weightOffsets) == 224);
-static_assert(offsetof(InferenceConstantBufferEntry, biasOffsets) == 240);
+static_assert(offsetof(DirectConstantBufferEntry, anisotropy) == 220);
+static_assert(offsetof(DirectConstantBufferEntry, useAnisotropy) == 224);
+static_assert(sizeof(DirectConstantBufferEntry) == 240);
+static_assert(offsetof(InferenceConstantBufferEntry, weightOffsets) == 240);
+static_assert(offsetof(InferenceConstantBufferEntry, biasOffsets) == 256);
 static_assert(offsetof(TrainingConstantBufferEntry, seed) == 48);
 static_assert(offsetof(TrainingConstantBufferEntry, useAnisotropy) == 56);
 static_assert(sizeof(TrainingConstantBufferEntry) == 64);
@@ -58,15 +63,22 @@ static std::random_device rd;
 struct UIData
 {
     float lightIntensity = 1.f;
+    float iblIntensity = 0.35f;
+    float iblRotation = 0.f;
     float specular = 0.5f;
-    float roughness = 0.4f;
-    float metallic = 0.7f;
+    float roughness = 1.f;
+    float metallic = 1.f;
     float anisotropy = 0.0f;
 
     float trainingTime = 0.0f;
+    int defaultPbrRenderTimeUs = 0;
+    int neuralRenderTimeUs = 0;
+    int trainingPassTimeUs = 0;
+    int optimizerPassTimeUs = 0;
     uint32_t epochs = 0;
 
     bool useAnisotropy = false;
+    bool useIBL = true;
     bool reset = false;
     bool training = true;
     bool load = false;
@@ -119,7 +131,8 @@ public:
         m_trainingShaderAnisotropic = m_shaderFactory->CreateShader("app/computeTraining", "main_cs", nullptr, nvrhi::ShaderType::Compute);
         m_trainingShaderOriginal = m_shaderFactory->CreateShader("app/computeTrainingOriginal", "main_cs", nullptr, nvrhi::ShaderType::Compute);
         m_optimizerPass.computeShader = m_shaderFactory->CreateShader("app/computeOptimizer", "adam_cs", nullptr, nvrhi::ShaderType::Compute);
-        assert(m_trainingShaderAnisotropic && m_trainingShaderOriginal && m_optimizerPass.computeShader);
+        m_convertWeightsPass.computeShader = m_shaderFactory->CreateShader("app/computeOptimizer", "convert_weights_cs", nullptr, nvrhi::ShaderType::Compute);
+        assert(m_trainingShaderAnisotropic && m_trainingShaderOriginal && m_optimizerPass.computeShader && m_convertWeightsPass.computeShader);
 
         m_trainingConstantBuffer = GetDevice()->createBuffer(nvrhi::utils::CreateStaticConstantBufferDesc(sizeof(TrainingConstantBufferEntry), "TrainingConstantBuffer")
                                                                  .setInitialState(nvrhi::ResourceStates::ConstantBuffer)
@@ -130,13 +143,20 @@ public:
         // Continue to load the render data and create the required structures
         //
         ////////////////////
-        auto [vertices, indices] = GenerateSphere(1, 64, 64);
+        const std::filesystem::path previewModelFileName = GetLocalPath("assets/data/Model") / "Meet_MAT.obj";
+        auto [vertices, indices] = LoadObjModel(previewModelFileName);
+        if (vertices.empty() || indices.empty())
+        {
+            log::error("Failed to load preview model: %s", previewModelFileName.string().c_str());
+            return false;
+        }
         m_indicesNum = (int)indices.size();
 
         nvrhi::VertexAttributeDesc attributes[] = {
             nvrhi::VertexAttributeDesc().setName("POSITION").setFormat(nvrhi::Format::RGB32_FLOAT).setOffset(0).setBufferIndex(0).setElementStride(sizeof(Vertex)),
             nvrhi::VertexAttributeDesc().setName("NORMAL").setFormat(nvrhi::Format::RGB32_FLOAT).setOffset(0).setBufferIndex(1).setElementStride(sizeof(Vertex)),
             nvrhi::VertexAttributeDesc().setName("TANGENT").setFormat(nvrhi::Format::RGB32_FLOAT).setOffset(0).setBufferIndex(2).setElementStride(sizeof(Vertex)),
+            nvrhi::VertexAttributeDesc().setName("TEXCOORD").setFormat(nvrhi::Format::RG32_FLOAT).setOffset(0).setBufferIndex(3).setElementStride(sizeof(Vertex)),
         };
 
         // Initialize direct pass
@@ -181,6 +201,25 @@ public:
             m_commandList = GetDevice()->createCommandList();
             m_commandList->open();
 
+            engine::TextureCache textureCache(GetDevice(), nativeFS, nullptr);
+            const std::filesystem::path environmentMapFileName = GetLocalPath("assets/data/HDR") / "IndoorEnvironmentHDRI013_1K_HDR.exr";
+            std::shared_ptr<engine::LoadedTexture> environmentMap = textureCache.LoadTextureFromFile(environmentMapFileName, false, m_commonPasses.get(), m_commandList);
+            if (!environmentMap || environmentMap->texture == nullptr)
+            {
+                log::error("Failed to load IBL environment map: %s", environmentMapFileName.string().c_str());
+                m_commandList->close();
+                return false;
+            }
+            m_environmentMap = environmentMap->texture;
+            m_environmentMipCount = float(m_environmentMap->getDesc().mipLevels);
+
+            m_pbrTextures = LoadDefaultPbrTextures(textureCache, m_commonPasses.get(), m_commandList);
+            if (!m_pbrTextures.IsComplete())
+            {
+                m_commandList->close();
+                return false;
+            }
+
             nvrhi::BufferDesc vertexBufferDesc;
             vertexBufferDesc.byteSize = vertices.size() * sizeof(vertices[0]);
             vertexBufferDesc.isVertexBuffer = true;
@@ -210,7 +249,15 @@ public:
         // Direct binding
         {
             nvrhi::BindingSetDesc bindingSetDesc;
-            bindingSetDesc.bindings = { nvrhi::BindingSetItem::ConstantBuffer(0, m_directPass.constantBuffer) };
+            bindingSetDesc.bindings = {
+                nvrhi::BindingSetItem::ConstantBuffer(0, m_directPass.constantBuffer),
+                nvrhi::BindingSetItem::Texture_SRV(1, m_environmentMap),
+                nvrhi::BindingSetItem::Texture_SRV(2, m_pbrTextures.baseColor),
+                nvrhi::BindingSetItem::Texture_SRV(3, m_pbrTextures.roughness),
+                nvrhi::BindingSetItem::Texture_SRV(4, m_pbrTextures.metallic),
+                nvrhi::BindingSetItem::Texture_SRV(5, m_pbrTextures.normal),
+                nvrhi::BindingSetItem::Sampler(0, m_commonPasses->m_LinearWrapSampler),
+            };
             nvrhi::utils::CreateBindingSetAndLayout(GetDevice(), nvrhi::ShaderType::All, 0, bindingSetDesc, m_directPass.bindingLayout, m_directPass.bindingSet);
         }
 
@@ -227,24 +274,27 @@ public:
 
     void CreateMLPBuffers()
     {
-        const auto& params = m_neuralNetwork->GetNetworkParams();
+        GetDevice()->waitForIdle();
+        GetDevice()->runGarbageCollection();
 
-        for (int i = 0; i < NUM_TRANSITIONS; ++i)
-        {
-            m_weightOffsets[i / 4][i % 4] = m_neuralNetwork->GetNetworkLayout().networkLayers[i].weightOffset;
-            m_biasOffsets[i / 4][i % 4] = m_neuralNetwork->GetNetworkLayout().networkLayers[i].biasOffset;
-        }
+        const auto& params = m_neuralNetwork->GetNetworkParams();
 
         // Get a device optimized layout
         m_deviceNetworkLayout = m_networkUtils->GetNewMatrixLayout(m_neuralNetwork->GetNetworkLayout(), rtxns::MatrixLayout::TrainingOptimal);
 
-        m_totalParameterCount = uint(params.size() / sizeof(uint16_t));
+        for (int i = 0; i < NUM_TRANSITIONS; ++i)
+        {
+            m_weightOffsets[i / 4][i % 4] = m_deviceNetworkLayout.networkLayers[i].weightOffset;
+            m_biasOffsets[i / 4][i % 4] = m_deviceNetworkLayout.networkLayers[i].biasOffset;
+        }
+
+        m_totalParameterCount = uint(m_deviceNetworkLayout.networkSize / sizeof(uint16_t));
         m_batchSize = BATCH_SIZE;
 
         // Create and fill buffers
         {
-            m_commandList = GetDevice()->createCommandList();
-            m_commandList->open();
+            nvrhi::CommandListHandle uploadCommandList = GetDevice()->createCommandList();
+            uploadCommandList->open();
 
             nvrhi::BufferDesc paramsBufferDesc;
 
@@ -265,20 +315,16 @@ public:
             m_mlpDeviceBuffer = GetDevice()->createBuffer(paramsBufferDesc);
 
             // Upload the parameters
-            UpdateDeviceNetworkParameters(m_commandList);
+            UpdateDeviceNetworkParameters(uploadCommandList);
 
             paramsBufferDesc.debugName = "MLPParamsBuffer32";
-            paramsBufferDesc.initialState = nvrhi::ResourceStates::CopyDest;
+            paramsBufferDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
             paramsBufferDesc.byteSize = m_totalParameterCount * sizeof(float);
             paramsBufferDesc.format = nvrhi::Format::R32_FLOAT;
             m_mlpParamsBuffer32 = GetDevice()->createBuffer(paramsBufferDesc);
 
-            m_commandList->beginTrackingBufferState(m_mlpParamsBuffer32, nvrhi::ResourceStates::CopyDest);
-            {
-                std::vector<float> fbuf(m_totalParameterCount);
-                std::transform((uint16_t*)params.data(), ((uint16_t*)params.data()) + m_totalParameterCount, fbuf.begin(), [](auto v) { return rtxns::float16ToFloat32(v); });
-                m_commandList->writeBuffer(m_mlpParamsBuffer32, fbuf.data(), paramsBufferDesc.byteSize);
-            }
+            uploadCommandList->beginTrackingBufferState(m_mlpParamsBuffer32, nvrhi::ResourceStates::UnorderedAccess);
+            uploadCommandList->clearBufferUInt(m_mlpParamsBuffer32, 0);
 
             paramsBufferDesc.debugName = "MLPGradientsBuffer";
             paramsBufferDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
@@ -287,8 +333,8 @@ public:
             paramsBufferDesc.format = nvrhi::Format::R16_FLOAT;
             m_mlpGradientsBuffer = GetDevice()->createBuffer(paramsBufferDesc);
 
-            m_commandList->beginTrackingBufferState(m_mlpGradientsBuffer, nvrhi::ResourceStates::UnorderedAccess);
-            m_commandList->clearBufferUInt(m_mlpGradientsBuffer, 0);
+            uploadCommandList->beginTrackingBufferState(m_mlpGradientsBuffer, nvrhi::ResourceStates::UnorderedAccess);
+            uploadCommandList->clearBufferUInt(m_mlpGradientsBuffer, 0);
 
             paramsBufferDesc.debugName = "MLPMoments1Buffer";
             paramsBufferDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
@@ -297,17 +343,19 @@ public:
             paramsBufferDesc.canHaveRawViews = false;
             m_mlpMoments1Buffer = GetDevice()->createBuffer(paramsBufferDesc);
 
-            m_commandList->beginTrackingBufferState(m_mlpMoments1Buffer, nvrhi::ResourceStates::UnorderedAccess);
-            m_commandList->clearBufferUInt(m_mlpMoments1Buffer, 0);
+            uploadCommandList->beginTrackingBufferState(m_mlpMoments1Buffer, nvrhi::ResourceStates::UnorderedAccess);
+            uploadCommandList->clearBufferUInt(m_mlpMoments1Buffer, 0);
 
             paramsBufferDesc.debugName = "MLPMoments2Buffer";
             m_mlpMoments2Buffer = GetDevice()->createBuffer(paramsBufferDesc);
 
-            m_commandList->beginTrackingBufferState(m_mlpMoments2Buffer, nvrhi::ResourceStates::UnorderedAccess);
-            m_commandList->clearBufferUInt(m_mlpMoments2Buffer, 0);
+            uploadCommandList->beginTrackingBufferState(m_mlpMoments2Buffer, nvrhi::ResourceStates::UnorderedAccess);
+            uploadCommandList->clearBufferUInt(m_mlpMoments2Buffer, 0);
 
-            m_commandList->close();
-            GetDevice()->executeCommandList(m_commandList);
+            uploadCommandList->close();
+            GetDevice()->executeCommandList(uploadCommandList);
+            GetDevice()->waitForIdle();
+            GetDevice()->runGarbageCollection();
         }
 
         nvrhi::BindingSetDesc bindingSetDesc = {};
@@ -348,6 +396,28 @@ public:
             m_optimizerPass.pipeline = GetDevice()->createComputePipeline(pipelineDesc);
         }
 
+        // Convert pass used before the first optimizer step after weights are uploaded.
+        {
+            m_convertWeightsPass.bindingSet = nullptr;
+            m_convertWeightsPass.bindingLayout = nullptr;
+
+            bindingSetDesc = {};
+            bindingSetDesc.bindings = {
+                nvrhi::BindingSetItem::ConstantBuffer(0, m_trainingConstantBuffer),
+                nvrhi::BindingSetItem::TypedBuffer_UAV(0, m_mlpDeviceBuffer),
+                nvrhi::BindingSetItem::TypedBuffer_UAV(1, m_mlpParamsBuffer32),
+                nvrhi::BindingSetItem::TypedBuffer_UAV(2, m_mlpGradientsBuffer),
+                nvrhi::BindingSetItem::TypedBuffer_UAV(3, m_mlpMoments1Buffer),
+                nvrhi::BindingSetItem::TypedBuffer_UAV(4, m_mlpMoments2Buffer),
+            };
+            nvrhi::utils::CreateBindingSetAndLayout(GetDevice(), nvrhi::ShaderType::All, 0, bindingSetDesc, m_convertWeightsPass.bindingLayout, m_convertWeightsPass.bindingSet);
+
+            nvrhi::ComputePipelineDesc pipelineDesc;
+            pipelineDesc.bindingLayouts = { m_convertWeightsPass.bindingLayout };
+            pipelineDesc.CS = m_convertWeightsPass.computeShader;
+            m_convertWeightsPass.pipeline = GetDevice()->createComputePipeline(pipelineDesc);
+        }
+
         // Inference binding
         {
             m_inferencePass.pipeline = nullptr;
@@ -355,7 +425,16 @@ public:
             m_inferencePass.bindingLayout = nullptr;
 
             bindingSetDesc = {};
-            bindingSetDesc.bindings = { nvrhi::BindingSetItem::ConstantBuffer(0, m_inferencePass.constantBuffer), nvrhi::BindingSetItem::RawBuffer_SRV(0, m_mlpDeviceBuffer) };
+            bindingSetDesc.bindings = {
+                nvrhi::BindingSetItem::ConstantBuffer(0, m_inferencePass.constantBuffer),
+                nvrhi::BindingSetItem::RawBuffer_SRV(0, m_mlpDeviceBuffer),
+                nvrhi::BindingSetItem::Texture_SRV(1, m_environmentMap),
+                nvrhi::BindingSetItem::Texture_SRV(2, m_pbrTextures.baseColor),
+                nvrhi::BindingSetItem::Texture_SRV(3, m_pbrTextures.roughness),
+                nvrhi::BindingSetItem::Texture_SRV(4, m_pbrTextures.metallic),
+                nvrhi::BindingSetItem::Texture_SRV(5, m_pbrTextures.normal),
+                nvrhi::BindingSetItem::Sampler(0, m_commonPasses->m_LinearWrapSampler),
+            };
             nvrhi::utils::CreateBindingSetAndLayout(GetDevice(), nvrhi::ShaderType::All, 0, bindingSetDesc, m_inferencePass.bindingLayout, m_inferencePass.bindingSet);
         }
 
@@ -366,7 +445,16 @@ public:
             m_differencePass.bindingLayout = nullptr;
 
             bindingSetDesc = {};
-            bindingSetDesc.bindings = { nvrhi::BindingSetItem::ConstantBuffer(0, m_differencePass.constantBuffer), nvrhi::BindingSetItem::RawBuffer_SRV(0, m_mlpDeviceBuffer) };
+            bindingSetDesc.bindings = {
+                nvrhi::BindingSetItem::ConstantBuffer(0, m_differencePass.constantBuffer),
+                nvrhi::BindingSetItem::RawBuffer_SRV(0, m_mlpDeviceBuffer),
+                nvrhi::BindingSetItem::Texture_SRV(1, m_environmentMap),
+                nvrhi::BindingSetItem::Texture_SRV(2, m_pbrTextures.baseColor),
+                nvrhi::BindingSetItem::Texture_SRV(3, m_pbrTextures.roughness),
+                nvrhi::BindingSetItem::Texture_SRV(4, m_pbrTextures.metallic),
+                nvrhi::BindingSetItem::Texture_SRV(5, m_pbrTextures.normal),
+                nvrhi::BindingSetItem::Sampler(0, m_commonPasses->m_LinearWrapSampler),
+            };
             nvrhi::utils::CreateBindingSetAndLayout(GetDevice(), nvrhi::ShaderType::All, 0, bindingSetDesc, m_differencePass.bindingLayout, m_differencePass.bindingSet);
         }
 
@@ -385,12 +473,12 @@ public:
         commandList->writeBuffer(m_mlpHostBuffer, m_neuralNetwork->GetNetworkParams().data(), m_neuralNetwork->GetNetworkParams().size());
 
         // Convert to GPU optimized layout
-        m_networkUtils->ConvertWeights(m_neuralNetwork->GetNetworkLayout(), m_deviceNetworkLayout, m_mlpHostBuffer, 0, m_mlpDeviceBuffer, 0, GetDevice(), m_commandList);
+        m_networkUtils->ConvertWeights(m_neuralNetwork->GetNetworkLayout(), m_deviceNetworkLayout, m_mlpHostBuffer, 0, m_mlpDeviceBuffer, 0, GetDevice(), commandList);
 
         // Update barriers for use
         commandList->setBufferState(m_mlpDeviceBuffer, nvrhi::ResourceStates::ShaderResource);
         commandList->commitBarriers();
-        // m_convertWeights = true;
+        m_convertWeights = true;
     }
 
 
@@ -401,9 +489,11 @@ public:
 
     bool MousePosUpdate(double xpos, double ypos) override
     {
-        if (m_pressedFlag)
+        const float2 mousePos{ float(xpos), float(ypos) };
+        const float2 delta = mousePos - m_currentXY;
+
+        if (m_lightDragActive)
         {
-            float2 delta = float2(float(xpos), float(ypos)) - m_currentXY;
             float a, e, d;
             cartesianToSpherical(m_lightDir, a, e, d);
             a += delta.x * 0.01f;
@@ -411,13 +501,31 @@ public:
             m_lightDir = sphericalToCartesian(a, e, d);
         }
 
-        m_currentXY = float2(float(xpos), float(ypos));
+        if (m_modelDragActive)
+        {
+            m_modelYaw += delta.x * 0.01f;
+            m_modelPitch = std::clamp(m_modelPitch + delta.y * 0.01f, -1.45f, 1.45f);
+        }
+
+        m_currentXY = mousePos;
         return true;
     }
 
     bool MouseButtonUpdate(int button, int action, int mods) override
     {
-        m_pressedFlag = action == 1;
+        constexpr int mouseButtonLeft = 0;
+        constexpr int mouseButtonRight = 1;
+        const bool pressed = action == 1;
+
+        if (button == mouseButtonLeft)
+        {
+            m_lightDragActive = pressed;
+        }
+        else if (button == mouseButtonRight)
+        {
+            m_modelDragActive = pressed;
+        }
+
         return true;
     }
 
@@ -430,11 +538,20 @@ public:
 
         auto toMicroSeconds = [&](const auto& timer) { return int(GetDevice()->getTimerQueryTime(timer) * 1000000); };
 
-        auto t = toMicroSeconds(m_disneyTimer);
-        if (t != 0)
+        const int defaultPbrRenderTimeUs = toMicroSeconds(m_disneyTimer);
+        if (defaultPbrRenderTimeUs != 0)
         {
-            m_extraStatus = std::format(" - Disney - {:3d}us, Neural - {:3d}us, Training - {:3d}us, Optimization - {:3d}us", t, toMicroSeconds(m_neuralTimer),
-                                        toMicroSeconds(m_trainingTimer), toMicroSeconds(m_optimizerTimer));
+            const int neuralRenderTimeUs = toMicroSeconds(m_neuralTimer);
+            const int trainingPassTimeUs = toMicroSeconds(m_trainingTimer);
+            const int optimizerPassTimeUs = toMicroSeconds(m_optimizerTimer);
+
+            m_userInterfaceParameters->defaultPbrRenderTimeUs = defaultPbrRenderTimeUs;
+            m_userInterfaceParameters->neuralRenderTimeUs = neuralRenderTimeUs;
+            m_userInterfaceParameters->trainingPassTimeUs = trainingPassTimeUs;
+            m_userInterfaceParameters->optimizerPassTimeUs = optimizerPassTimeUs;
+
+            m_extraStatus = std::format(" - Disney - {:3d}us, Neural - {:3d}us, Training - {:3d}us, Optimization - {:3d}us", defaultPbrRenderTimeUs, neuralRenderTimeUs,
+                                        trainingPassTimeUs, optimizerPassTimeUs);
         }
         GetDeviceManager()->SetInformativeWindowTitle(g_windowTitle, true, m_extraStatus.c_str());
 
@@ -501,6 +618,8 @@ public:
         m_directPass.pipeline = nullptr;
         m_inferencePass.pipeline = nullptr;
         m_differencePass.pipeline = nullptr;
+        m_depthBuffer = nullptr;
+        m_depthFramebuffers.clear();
     }
 
     void Render(nvrhi::IFramebuffer* framebuffer) override
@@ -514,10 +633,12 @@ public:
 
         // Update statistics every g_statisticsPerFrames frames
         bool updateStat = GetDeviceManager()->GetCurrentBackBufferIndex() % g_statisticsPerFrames == 0;
+        nvrhi::IFramebuffer* renderFramebuffer = GetDepthFramebuffer(framebuffer);
 
-        // Camera at (0,0,2) looking at (0,0,-1) direction, up direction (0,1,0)
+        // Orbit camera around the preview model. Right mouse drag changes yaw/pitch.
+        const float3 cameraPos = GetCameraPosition();
+        const float3 viewDir = -normalize(cameraPos);
         float3 cameraUp(0, 1, 0);
-        float4 viewDir(0, 0, -1, 0);
 
         // Fill out the constant buffer slices for multiple views of the model.
         bool useAnisotropy = m_activeUseAnisotropy;
@@ -525,10 +646,12 @@ public:
 
         DirectConstantBufferEntry directModelConstant{ {},
                                                        {},
-                                                       { 0, 0, 2, 0 },
+                                                       float4(cameraPos, 0.f),
                                                        float4(m_lightDir, 1.f),
                                                        float4(m_userInterfaceParameters->lightIntensity),
-                                                       float4(.82f, .67f, .16f, 1.f),
+                                                       float4(m_userInterfaceParameters->iblIntensity, m_userInterfaceParameters->iblRotation, m_environmentMipCount,
+                                                              m_userInterfaceParameters->useIBL ? 1.f : 0.f),
+                                                       float4(1.f, 1.f, 1.f, 1.f),
                                                        m_userInterfaceParameters->specular,
                                                        m_userInterfaceParameters->roughness,
                                                        m_userInterfaceParameters->metallic,
@@ -537,7 +660,7 @@ public:
                                                        0.f,
                                                        0.f,
                                                        0.f };
-        directModelConstant.view = affineToHomogeneous(translation(-directModelConstant.cameraPos.xyz()) * lookatZ(-viewDir.xyz(), cameraUp));
+        directModelConstant.view = affineToHomogeneous(translation(-cameraPos) * lookatZ(-viewDir, cameraUp));
         directModelConstant.viewProject = directModelConstant.view * perspProjD3DStyle(radians(67.4f), float(width) / float(height), 0.1f, 10.f);
 
         ////////////////////
@@ -559,6 +682,31 @@ public:
         ////////////////////
         if (m_userInterfaceParameters->training)
         {
+            if (m_convertWeights)
+            {
+                TrainingConstantBufferEntry convertConstants = {
+                    .maxParamSize = m_totalParameterCount,
+                    .learningRate = m_learningRate,
+                    .currentStep = float(m_currentOptimizationStep),
+                    .batchSize = m_batchSize,
+                    .seed = seed,
+                    .useAnisotropy = useAnisotropy ? 1u : 0u,
+                    .pad0 = 0.f
+                };
+                std::ranges::copy(m_weightOffsets, convertConstants.weightOffsets);
+                std::ranges::copy(m_biasOffsets, convertConstants.biasOffsets);
+                m_commandList->writeBuffer(m_trainingConstantBuffer, &convertConstants, sizeof(convertConstants));
+
+                nvrhi::ComputeState state;
+                state.bindings = { m_convertWeightsPass.bindingSet };
+                state.pipeline = m_convertWeightsPass.pipeline;
+                m_commandList->beginMarker("Convert Weights");
+                m_commandList->setComputeState(state);
+                m_commandList->dispatch(div_ceil(m_totalParameterCount, 32), 1, 1);
+                m_commandList->endMarker();
+                m_convertWeights = false;
+            }
+
             for (int i = 0; i < BATCH_COUNT; ++i)
             {
                 TrainingConstantBufferEntry trainingModelConstant = {
@@ -621,7 +769,8 @@ public:
             ++m_userInterfaceParameters->epochs;
         }
 
-        nvrhi::utils::ClearColorAttachment(m_commandList, framebuffer, 0, nvrhi::Color(0.f));
+        nvrhi::utils::ClearColorAttachment(m_commandList, renderFramebuffer, 0, nvrhi::Color(0.f));
+        nvrhi::utils::ClearDepthStencilAttachment(m_commandList, renderFramebuffer, 1.f, 0);
 
         RenderPass* passes[] = { &m_directPass, &m_inferencePass, &m_differencePass };
         for (int viewIndex = 0; viewIndex < g_viewsNum; ++viewIndex)
@@ -644,9 +793,11 @@ public:
                 psoDesc.inputLayout = pass.inputLayout;
                 psoDesc.bindingLayouts = { pass.bindingLayout };
                 psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
-                psoDesc.renderState.depthStencilState.depthTestEnable = false;
+                psoDesc.renderState.depthStencilState.depthTestEnable = true;
+                psoDesc.renderState.depthStencilState.depthWriteEnable = true;
+                psoDesc.renderState.depthStencilState.depthFunc = nvrhi::ComparisonFunc::Less;
 
-                pass.pipeline = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
+                pass.pipeline = GetDevice()->createGraphicsPipeline(psoDesc, renderFramebuffer);
             }
 
             if (viewIndex == 0)
@@ -666,9 +817,10 @@ public:
                 { m_vertexBuffer, 0, offsetof(Vertex, position) },
                 { m_vertexBuffer, 1, offsetof(Vertex, normal) },
                 { m_vertexBuffer, 2, offsetof(Vertex, tangent) },
+                { m_vertexBuffer, 3, offsetof(Vertex, texcoord) },
             };
             state.pipeline = pass.pipeline;
-            state.framebuffer = framebuffer;
+            state.framebuffer = renderFramebuffer;
 
             // Construct the viewport so that all viewports form a grid.
             const float left = width * viewIndex;
@@ -740,6 +892,62 @@ public:
     }
 
 private:
+    nvrhi::IFramebuffer* GetDepthFramebuffer(nvrhi::IFramebuffer* framebuffer)
+    {
+        const nvrhi::FramebufferInfoEx& fbinfo = framebuffer->getFramebufferInfo();
+        const nvrhi::TextureDesc* depthDesc = m_depthBuffer ? &m_depthBuffer->getDesc() : nullptr;
+        if (!depthDesc || depthDesc->width != fbinfo.width || depthDesc->height != fbinfo.height || depthDesc->sampleCount != fbinfo.sampleCount ||
+            depthDesc->sampleQuality != fbinfo.sampleQuality)
+        {
+            const nvrhi::Format depthFormats[] = { nvrhi::Format::D24S8, nvrhi::Format::D32, nvrhi::Format::D16 };
+            const nvrhi::Format depthFormat = nvrhi::utils::ChooseFormat(GetDevice(), nvrhi::FormatSupport::Texture | nvrhi::FormatSupport::DepthStencil, depthFormats,
+                                                                         uint32_t(sizeof(depthFormats) / sizeof(depthFormats[0])));
+
+            nvrhi::TextureDesc newDepthDesc;
+            newDepthDesc.width = fbinfo.width;
+            newDepthDesc.height = fbinfo.height;
+            newDepthDesc.sampleCount = fbinfo.sampleCount;
+            newDepthDesc.sampleQuality = fbinfo.sampleQuality;
+            newDepthDesc.format = depthFormat;
+            newDepthDesc.isRenderTarget = true;
+            newDepthDesc.isShaderResource = false;
+            newDepthDesc.initialState = nvrhi::ResourceStates::DepthWrite;
+            newDepthDesc.keepInitialState = true;
+            newDepthDesc.clearValue = nvrhi::Color(1.f);
+            newDepthDesc.useClearValue = true;
+            newDepthDesc.debugName = "ShaderTrainingDepth";
+
+            m_depthBuffer = GetDevice()->createTexture(newDepthDesc);
+            m_depthFramebuffers.clear();
+        }
+
+        for (auto& item : m_depthFramebuffers)
+        {
+            if (item.first == framebuffer)
+            {
+                return item.second;
+            }
+        }
+
+        nvrhi::FramebufferDesc desc;
+        for (const nvrhi::FramebufferAttachment& attachment : framebuffer->getDesc().colorAttachments)
+        {
+            desc.addColorAttachment(attachment);
+        }
+        desc.setDepthAttachment(m_depthBuffer);
+
+        nvrhi::FramebufferHandle depthFramebuffer = GetDevice()->createFramebuffer(desc);
+        nvrhi::IFramebuffer* result = depthFramebuffer;
+        m_depthFramebuffers.emplace_back(framebuffer, std::move(depthFramebuffer));
+        return result;
+    }
+
+    float3 GetCameraPosition() const
+    {
+        const float cosPitch = std::cos(m_modelPitch);
+        return float3(std::sin(m_modelYaw) * cosPitch, std::sin(m_modelPitch), std::cos(m_modelYaw) * cosPitch) * m_cameraDistance;
+    }
+
     std::string m_extraStatus;
     nvrhi::TimerQueryHandle m_disneyTimer;
     nvrhi::TimerQueryHandle m_neuralTimer;
@@ -775,8 +983,13 @@ private:
     RenderPass m_differencePass;
 
     float3 m_lightDir{ -0.761f, -0.467f, -0.450f };
+    float m_environmentMipCount = 1.f;
+    float m_modelYaw = 0.f;
+    float m_modelPitch = 0.f;
+    float m_cameraDistance = 2.f;
     float2 m_currentXY;
-    bool m_pressedFlag = false;
+    bool m_lightDragActive = false;
+    bool m_modelDragActive = false;
 
     nvrhi::BufferHandle m_vertexBuffer;
     nvrhi::BufferHandle m_indexBuffer;
@@ -788,6 +1001,10 @@ private:
     nvrhi::BufferHandle m_mlpGradientsBuffer;
     nvrhi::BufferHandle m_mlpMoments1Buffer;
     nvrhi::BufferHandle m_mlpMoments2Buffer;
+    nvrhi::TextureHandle m_environmentMap;
+    PbrTextureSet m_pbrTextures;
+    nvrhi::TextureHandle m_depthBuffer;
+    std::vector<std::pair<nvrhi::IFramebuffer*, nvrhi::FramebufferHandle>> m_depthFramebuffers;
 
     uint m_totalParameterCount = 0;
     uint m_batchSize = BATCH_SIZE;
@@ -808,12 +1025,14 @@ private:
 
     NeuralPass m_trainingPass;
     NeuralPass m_optimizerPass;
+    NeuralPass m_convertWeightsPass;
 
     uint4 m_weightOffsets[NUM_TRANSITIONS_ALIGN4];
     uint4 m_biasOffsets[NUM_TRANSITIONS_ALIGN4];
 
     UIData* m_userInterfaceParameters;
     bool m_activeUseAnisotropy = false;
+    bool m_convertWeights = true;
 
     std::shared_ptr<rtxns::NetworkUtilities> m_networkUtils;
     std::unique_ptr<rtxns::HostNetwork> m_neuralNetwork;
@@ -842,10 +1061,37 @@ public:
         ImGui::SetNextWindowPos(ImVec2(10.f, 10.f), 0);
         ImGui::Begin("Settings", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
 
+        ImGui::SetNextItemOpen(true, ImGuiCond_Always);
+        if (ImGui::CollapsingHeader("Performance", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            ImGui::Text("Disney/PBR Render : %d us (%.3f ms)", m_userInterfaceParameters->defaultPbrRenderTimeUs,
+                        float(m_userInterfaceParameters->defaultPbrRenderTimeUs) / 1000.f);
+            ImGui::Text("Neural Render : %d us (%.3f ms)", m_userInterfaceParameters->neuralRenderTimeUs,
+                        float(m_userInterfaceParameters->neuralRenderTimeUs) / 1000.f);
+
+            if (m_userInterfaceParameters->defaultPbrRenderTimeUs > 0 && m_userInterfaceParameters->neuralRenderTimeUs > 0)
+            {
+                const int neuralDeltaUs = m_userInterfaceParameters->neuralRenderTimeUs - m_userInterfaceParameters->defaultPbrRenderTimeUs;
+                const float neuralRatio = float(m_userInterfaceParameters->neuralRenderTimeUs) / float(m_userInterfaceParameters->defaultPbrRenderTimeUs);
+                const float pbrToNeuralSpeedup = float(m_userInterfaceParameters->defaultPbrRenderTimeUs) / float(m_userInterfaceParameters->neuralRenderTimeUs);
+                ImGui::Text("Neural vs Disney/PBR Delta : %+d us", neuralDeltaUs);
+                ImGui::Text("Disney/PBR / Neural Speedup : %.2fx", pbrToNeuralSpeedup);
+                ImGui::Text("Neural / Disney/PBR Cost : %.2fx", neuralRatio);
+            }
+
+            ImGui::Text("Training : %d us (%.3f ms)", m_userInterfaceParameters->trainingPassTimeUs, float(m_userInterfaceParameters->trainingPassTimeUs) / 1000.f);
+            ImGui::Text("Optimization : %d us (%.3f ms)", m_userInterfaceParameters->optimizerPassTimeUs,
+                        float(m_userInterfaceParameters->optimizerPassTimeUs) / 1000.f);
+        }
+        ImGui::Separator();
+
         ImGui::SliderFloat("Light Intensity", &m_userInterfaceParameters->lightIntensity, 0.f, 20.f);
+        ImGui::Checkbox("Enable IBL", &m_userInterfaceParameters->useIBL);
+        ImGui::SliderFloat("IBL Intensity", &m_userInterfaceParameters->iblIntensity, 0.f, 5.f);
+        ImGui::SliderFloat("IBL Rotation", &m_userInterfaceParameters->iblRotation, -3.14159f, 3.14159f);
         ImGui::SliderFloat("Specular", &m_userInterfaceParameters->specular, 0.f, 1.f);
-        ImGui::SliderFloat("Roughness", &m_userInterfaceParameters->roughness, 0.3f, 1.f);
-        ImGui::SliderFloat("Metallic", &m_userInterfaceParameters->metallic, 0.f, 1.f);
+        ImGui::SliderFloat("Roughness Scale", &m_userInterfaceParameters->roughness, 0.1f, 2.f);
+        ImGui::SliderFloat("Metallic Scale", &m_userInterfaceParameters->metallic, 0.f, 1.f);
         if (ImGui::Checkbox("Anisotropic Kajiya-Kay", &m_userInterfaceParameters->useAnisotropy))
         {
             m_userInterfaceParameters->reset = true;

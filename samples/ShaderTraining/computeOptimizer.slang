@@ -42,3 +42,13 @@ void adam_cs(uint3 dispatchThreadID: SV_DispatchThreadID)
         gMLPParams[i] = (half) adjustedWeightbias;
     }
 }
+
+[numthreads(32, 1, 1)]
+void convert_weights_cs(uint3 dispatchThreadID: SV_DispatchThreadID)
+{
+    uint i = dispatchThreadID.x;
+    if (i >= gConst.maxParamSize)
+        return;
+
+    gMLPParams32[i] = float(gMLPParams[i]);
+}

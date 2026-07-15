@@ -23,10 +23,15 @@
 #include "GeometryUtils.h"
 #include "NeuralNetwork.h"
 #include "DirectoryHelper.h"
+#include "PbrTextureUtils.h"
 
+#include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <fstream>
 #include <format>
+#include <utility>
+#include <vector>
 
 using namespace donut;
 using namespace donut::math;
@@ -38,9 +43,12 @@ static const char* g_windowTitle = "RTX Neural Shading Example: Simple Inferenci
 struct UIData
 {
     float lightIntensity = 1.f;
+    float iblIntensity = 0.35f;
+    float iblRotation = 0.f;
     float specular = 0.5f;
-    float roughness = 0.4f;
-    float metallic = 0.7f;
+    float roughness = 1.f;
+    float metallic = 1.f;
+    bool useIBL = true;
 };
 
 class SimpleInferencing : public app::IRenderPass
@@ -99,7 +107,13 @@ public:
             return false;
         }
 
-        auto [vertices, indices] = GenerateSphere(1, 64, 64);
+        const std::filesystem::path previewModelFileName = GetLocalPath("assets/data/Model") / "Meet_MAT.obj";
+        auto [vertices, indices] = LoadObjModel(previewModelFileName);
+        if (vertices.empty() || indices.empty())
+        {
+            log::error("Failed to load preview model: %s", previewModelFileName.string().c_str());
+            return false;
+        }
         m_indicesNum = (int)indices.size();
 
         m_constantBuffer = GetDevice()->createBuffer(
@@ -108,16 +122,36 @@ public:
         nvrhi::VertexAttributeDesc attributes[] = {
             nvrhi::VertexAttributeDesc().setName("POSITION").setFormat(nvrhi::Format::RGB32_FLOAT).setOffset(0).setBufferIndex(0).setElementStride(sizeof(Vertex)),
             nvrhi::VertexAttributeDesc().setName("NORMAL").setFormat(nvrhi::Format::RGB32_FLOAT).setOffset(0).setBufferIndex(1).setElementStride(sizeof(Vertex)),
+            nvrhi::VertexAttributeDesc().setName("TANGENT").setFormat(nvrhi::Format::RGB32_FLOAT).setOffset(0).setBufferIndex(2).setElementStride(sizeof(Vertex)),
+            nvrhi::VertexAttributeDesc().setName("TEXCOORD").setFormat(nvrhi::Format::RG32_FLOAT).setOffset(0).setBufferIndex(3).setElementStride(sizeof(Vertex)),
         };
         m_inputLayout = GetDevice()->createInputLayout(attributes, uint32_t(std::size(attributes)), m_vertexShader);
 
-        engine::CommonRenderPasses commonPasses(GetDevice(), m_shaderFactory);
+        m_commonPasses = std::make_shared<engine::CommonRenderPasses>(GetDevice(), m_shaderFactory);
 
         auto nativeFS = std::make_shared<vfs::NativeFileSystem>();
         engine::TextureCache textureCache(GetDevice(), nativeFS, nullptr);
 
         m_commandList = GetDevice()->createCommandList();
         m_commandList->open();
+
+        const std::filesystem::path environmentMapFileName = GetLocalPath("assets/data/HDR") / "IndoorEnvironmentHDRI013_1K_HDR.exr";
+        std::shared_ptr<engine::LoadedTexture> environmentMap = textureCache.LoadTextureFromFile(environmentMapFileName, false, m_commonPasses.get(), m_commandList);
+        if (!environmentMap || environmentMap->texture == nullptr)
+        {
+            log::error("Failed to load IBL environment map: %s", environmentMapFileName.string().c_str());
+            m_commandList->close();
+            return false;
+        }
+        m_environmentMap = environmentMap->texture;
+        m_environmentMipCount = float(m_environmentMap->getDesc().mipLevels);
+
+        m_pbrTextures = LoadDefaultPbrTextures(textureCache, m_commonPasses.get(), m_commandList);
+        if (!m_pbrTextures.IsComplete())
+        {
+            m_commandList->close();
+            return false;
+        }
 
         nvrhi::BufferDesc vertexBufferDesc;
         vertexBufferDesc.byteSize = vertices.size() * sizeof(vertices[0]);
@@ -185,7 +219,13 @@ public:
         bindingSetDesc.bindings = { // Note: using viewIndex to construct a buffer range.
                                     nvrhi::BindingSetItem::ConstantBuffer(0, m_constantBuffer),
                                     // Parameters buffer
-                                    nvrhi::BindingSetItem::RawBuffer_SRV(0, m_mlpDeviceBuffer)
+                                    nvrhi::BindingSetItem::RawBuffer_SRV(0, m_mlpDeviceBuffer),
+                                    nvrhi::BindingSetItem::Texture_SRV(1, m_environmentMap),
+                                    nvrhi::BindingSetItem::Texture_SRV(2, m_pbrTextures.baseColor),
+                                    nvrhi::BindingSetItem::Texture_SRV(3, m_pbrTextures.roughness),
+                                    nvrhi::BindingSetItem::Texture_SRV(4, m_pbrTextures.metallic),
+                                    nvrhi::BindingSetItem::Texture_SRV(5, m_pbrTextures.normal),
+                                    nvrhi::BindingSetItem::Sampler(0, m_commonPasses->m_LinearWrapSampler)
         };
 
         // Create the binding layout (if it's empty -- so, on the first iteration) and the binding set.
@@ -207,9 +247,11 @@ public:
 
     bool MousePosUpdate(double xpos, double ypos) override
     {
-        if (m_pressedFlag)
+        const float2 mousePos{ float(xpos), float(ypos) };
+        const float2 delta = mousePos - m_currentXY;
+
+        if (m_lightDragActive)
         {
-            float2 delta = float2(float(xpos), float(ypos)) - m_currentXY;
             float a, e, d;
             cartesianToSpherical(m_lightDir, a, e, d);
             a += delta.x * 0.01f;
@@ -217,13 +259,31 @@ public:
             m_lightDir = sphericalToCartesian(a, e, d);
         }
 
-        m_currentXY = float2(float(xpos), float(ypos));
+        if (m_modelDragActive)
+        {
+            m_modelYaw += delta.x * 0.01f;
+            m_modelPitch = std::clamp(m_modelPitch + delta.y * 0.01f, -1.45f, 1.45f);
+        }
+
+        m_currentXY = mousePos;
         return true;
     }
 
     bool MouseButtonUpdate(int button, int action, int mods) override
     {
-        m_pressedFlag = action == 1;
+        constexpr int mouseButtonLeft = 0;
+        constexpr int mouseButtonRight = 1;
+        const bool pressed = action == 1;
+
+        if (button == mouseButtonLeft)
+        {
+            m_lightDragActive = pressed;
+        }
+        else if (button == mouseButtonRight)
+        {
+            m_modelDragActive = pressed;
+        }
+
         return true;
     }
 
@@ -241,6 +301,8 @@ public:
     void BackBufferResizing() override
     {
         m_pipeline = nullptr;
+        m_depthBuffer = nullptr;
+        m_depthFramebuffers.clear();
     }
 
     void Render(nvrhi::IFramebuffer* framebuffer) override
@@ -253,6 +315,8 @@ public:
 
         bool updateStat = GetDeviceManager()->GetCurrentBackBufferIndex() % 100 == 0;
 
+        nvrhi::IFramebuffer* renderFramebuffer = GetDepthFramebuffer(framebuffer);
+
         if (!m_pipeline)
         {
             nvrhi::GraphicsPipelineDesc psoDesc;
@@ -261,18 +325,22 @@ public:
             psoDesc.inputLayout = m_inputLayout;
             psoDesc.bindingLayouts = { m_bindingLayout };
             psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
-            psoDesc.renderState.depthStencilState.depthTestEnable = false;
+            psoDesc.renderState.depthStencilState.depthTestEnable = true;
+            psoDesc.renderState.depthStencilState.depthWriteEnable = true;
+            psoDesc.renderState.depthStencilState.depthFunc = nvrhi::ComparisonFunc::Less;
 
-            m_pipeline = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
+            m_pipeline = GetDevice()->createGraphicsPipeline(psoDesc, renderFramebuffer);
         }
 
         m_commandList->open();
 
-        nvrhi::utils::ClearColorAttachment(m_commandList, framebuffer, 0, nvrhi::Color(0.f));
+        nvrhi::utils::ClearColorAttachment(m_commandList, renderFramebuffer, 0, nvrhi::Color(0.f));
+        nvrhi::utils::ClearDepthStencilAttachment(m_commandList, renderFramebuffer, 1.f, 0);
 
-        // Camera at (0,0,2) looking at (0,0,-1) direction, up direction (0,1,0)
+        // Orbit camera around the preview model. Right mouse drag changes yaw/pitch.
+        const float3 cameraPos = GetCameraPosition();
+        const float3 viewDir = -normalize(cameraPos);
         float3 cameraUp(0, 1, 0);
-        float4 viewDir(0, 0, -1, 0);
 
         ////////////////////
         //
@@ -281,17 +349,19 @@ public:
         ////////////////////
         NeuralConstants modelConstant{ {},
                                        {},
-                                       { 0, 0, 2, 0 },
+                                       float4(cameraPos, 0.f),
                                        float4(m_lightDir, 1.f),
                                        float4(m_userInterfaceParameters->lightIntensity),
-                                       float4(.82f, .67f, .16f, 1.f),
+                                       float4(m_userInterfaceParameters->iblIntensity, m_userInterfaceParameters->iblRotation, m_environmentMipCount,
+                                              m_userInterfaceParameters->useIBL ? 1.f : 0.f),
+                                       float4(1.f, 1.f, 1.f, 1.f),
                                        m_userInterfaceParameters->specular,
                                        m_userInterfaceParameters->roughness,
                                        m_userInterfaceParameters->metallic,
                                        0.f,
                                        m_weightOffsets,
                                        m_biasOffsets };
-        modelConstant.view = affineToHomogeneous(translation(-modelConstant.cameraPos.xyz()) * lookatZ(-viewDir.xyz(), cameraUp));
+        modelConstant.view = affineToHomogeneous(translation(-cameraPos) * lookatZ(-viewDir, cameraUp));
         modelConstant.viewProject = modelConstant.view * perspProjD3DStyle(radians(67.4f), float(width) / float(height), 0.1f, 10.f);
 
         // Upload the constant buffer.
@@ -304,9 +374,11 @@ public:
         state.vertexBuffers = {
             { m_vertexBuffer, 0, offsetof(Vertex, position) },
             { m_vertexBuffer, 1, offsetof(Vertex, normal) },
+            { m_vertexBuffer, 2, offsetof(Vertex, tangent) },
+            { m_vertexBuffer, 3, offsetof(Vertex, texcoord) },
         };
         state.pipeline = m_pipeline;
-        state.framebuffer = framebuffer;
+        state.framebuffer = renderFramebuffer;
 
         const nvrhi::Viewport viewport = nvrhi::Viewport(left, left + width, top, top + height, 0.f, 1.f);
         state.viewport.addViewportAndScissorRect(viewport);
@@ -335,6 +407,62 @@ public:
     }
 
 private:
+    nvrhi::IFramebuffer* GetDepthFramebuffer(nvrhi::IFramebuffer* framebuffer)
+    {
+        const nvrhi::FramebufferInfoEx& fbinfo = framebuffer->getFramebufferInfo();
+        const nvrhi::TextureDesc* depthDesc = m_depthBuffer ? &m_depthBuffer->getDesc() : nullptr;
+        if (!depthDesc || depthDesc->width != fbinfo.width || depthDesc->height != fbinfo.height || depthDesc->sampleCount != fbinfo.sampleCount ||
+            depthDesc->sampleQuality != fbinfo.sampleQuality)
+        {
+            const nvrhi::Format depthFormats[] = { nvrhi::Format::D24S8, nvrhi::Format::D32, nvrhi::Format::D16 };
+            const nvrhi::Format depthFormat = nvrhi::utils::ChooseFormat(GetDevice(), nvrhi::FormatSupport::Texture | nvrhi::FormatSupport::DepthStencil, depthFormats,
+                                                                         uint32_t(sizeof(depthFormats) / sizeof(depthFormats[0])));
+
+            nvrhi::TextureDesc newDepthDesc;
+            newDepthDesc.width = fbinfo.width;
+            newDepthDesc.height = fbinfo.height;
+            newDepthDesc.sampleCount = fbinfo.sampleCount;
+            newDepthDesc.sampleQuality = fbinfo.sampleQuality;
+            newDepthDesc.format = depthFormat;
+            newDepthDesc.isRenderTarget = true;
+            newDepthDesc.isShaderResource = false;
+            newDepthDesc.initialState = nvrhi::ResourceStates::DepthWrite;
+            newDepthDesc.keepInitialState = true;
+            newDepthDesc.clearValue = nvrhi::Color(1.f);
+            newDepthDesc.useClearValue = true;
+            newDepthDesc.debugName = "SimpleInferencingDepth";
+
+            m_depthBuffer = GetDevice()->createTexture(newDepthDesc);
+            m_depthFramebuffers.clear();
+        }
+
+        for (auto& item : m_depthFramebuffers)
+        {
+            if (item.first == framebuffer)
+            {
+                return item.second;
+            }
+        }
+
+        nvrhi::FramebufferDesc desc;
+        for (const nvrhi::FramebufferAttachment& attachment : framebuffer->getDesc().colorAttachments)
+        {
+            desc.addColorAttachment(attachment);
+        }
+        desc.setDepthAttachment(m_depthBuffer);
+
+        nvrhi::FramebufferHandle depthFramebuffer = GetDevice()->createFramebuffer(desc);
+        nvrhi::IFramebuffer* result = depthFramebuffer;
+        m_depthFramebuffers.emplace_back(framebuffer, std::move(depthFramebuffer));
+        return result;
+    }
+
+    float3 GetCameraPosition() const
+    {
+        const float cosPitch = std::cos(m_modelPitch);
+        return float3(std::sin(m_modelYaw) * cosPitch, std::sin(m_modelPitch), std::cos(m_modelYaw) * cosPitch) * m_cameraDistance;
+    }
+
     std::string m_extraStatus;
     nvrhi::TimerQueryHandle m_neuralTimer;
     nvrhi::ShaderHandle m_vertexShader;
@@ -348,14 +476,24 @@ private:
     nvrhi::BindingLayoutHandle m_bindingLayout;
     nvrhi::BindingSetHandle m_bindingSet;
     nvrhi::GraphicsPipelineHandle m_pipeline;
+    nvrhi::TextureHandle m_depthBuffer;
+    std::vector<std::pair<nvrhi::IFramebuffer*, nvrhi::FramebufferHandle>> m_depthFramebuffers;
     nvrhi::CommandListHandle m_commandList;
 
     std::shared_ptr<engine::ShaderFactory> m_shaderFactory;
+    std::shared_ptr<engine::CommonRenderPasses> m_commonPasses;
     std::shared_ptr<rtxns::NetworkUtilities> m_networkUtils;
+    nvrhi::TextureHandle m_environmentMap;
+    PbrTextureSet m_pbrTextures;
 
     float3 m_lightDir{ -0.761f, -0.467f, -0.450f };
+    float m_environmentMipCount = 1.f;
+    float m_modelYaw = 0.f;
+    float m_modelPitch = 0.f;
+    float m_cameraDistance = 2.f;
     float2 m_currentXY;
-    bool m_pressedFlag = false;
+    bool m_lightDragActive = false;
+    bool m_modelDragActive = false;
 
     int m_indicesNum = 0;
 
@@ -382,9 +520,12 @@ public:
         ImGui::Begin("Settings", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
 
         ImGui::SliderFloat("Light Intensity", &m_userInterfaceParameters->lightIntensity, 0.f, 20.f);
+        ImGui::Checkbox("Enable IBL", &m_userInterfaceParameters->useIBL);
+        ImGui::SliderFloat("IBL Intensity", &m_userInterfaceParameters->iblIntensity, 0.f, 5.f);
+        ImGui::SliderFloat("IBL Rotation", &m_userInterfaceParameters->iblRotation, -3.14159f, 3.14159f);
         ImGui::SliderFloat("Specular", &m_userInterfaceParameters->specular, 0.f, 1.f);
-        ImGui::SliderFloat("Roughness", &m_userInterfaceParameters->roughness, 0.3f, 1.f);
-        ImGui::SliderFloat("Metallic", &m_userInterfaceParameters->metallic, 0.f, 1.f);
+        ImGui::SliderFloat("Roughness Scale", &m_userInterfaceParameters->roughness, 0.1f, 2.f);
+        ImGui::SliderFloat("Metallic Scale", &m_userInterfaceParameters->metallic, 0.f, 1.f);
 
         ImGui::End();
     }

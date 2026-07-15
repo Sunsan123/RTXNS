@@ -30,6 +30,7 @@ struct NeuralConstants
     // Light setup
     float4 lightDir;
     float4 lightIntensity;
+    float4 iblSettings;
 
     // Material props
     float4 baseColor;

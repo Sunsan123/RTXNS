@@ -12,6 +12,12 @@
 #include <donut/shaders/binding_helpers.hlsli>
 
 DECLARE_CBUFFER(DirectConstantBufferEntry, gConst, 0, 0);
+Texture2D<float4> gEnvironmentMap : REGISTER_SRV(1, 0);
+Texture2D<float4> gBaseColorMap : REGISTER_SRV(2, 0);
+Texture2D<float4> gRoughnessMap : REGISTER_SRV(3, 0);
+Texture2D<float4> gMetallicMap : REGISTER_SRV(4, 0);
+Texture2D<float4> gNormalMap : REGISTER_SRV(5, 0);
+SamplerState gEnvironmentSampler : REGISTER_SAMPLER(0, 0);
 
 struct PS_INPUT
 {
@@ -19,9 +25,12 @@ struct PS_INPUT
     float3 norm : NORMAL;
     float3 view : VIEW;
     float3 tan : TANGENT;
+    float2 uv : TEXCOORD;
 }
 
 import Disney;
+import IBL;
+import PBRTextures;
 
 [shader("fragment")]
 void main_ps(
@@ -30,7 +39,19 @@ void main_ps(
 {
     //----------- Prepare input parameters
     float3 view = normalize(input.view);
-    float3 norm = normalize(input.norm);
+    PbrMaterialSample material = SamplePbrMaterial(
+        gBaseColorMap,
+        gRoughnessMap,
+        gMetallicMap,
+        gNormalMap,
+        gEnvironmentSampler,
+        input.uv,
+        input.norm,
+        input.tan,
+        gConst.baseColor,
+        gConst.roughness,
+        gConst.metallic);
+    float3 norm = material.normal;
     float3 h = normalize(-gConst.lightDir.xyz + view);
 
     float NdotL = max(0.f, dot(norm, -gConst.lightDir.xyz));
@@ -39,13 +60,14 @@ void main_ps(
     float LdotH = max(0.f, dot(h, -gConst.lightDir.xyz));
 
     //----------- Calculate core shader part DIRECTLY
-    float4 outParams = Disney(NdotL, NdotV, NdotH, LdotH, gConst.roughness);
+    float4 outParams = Disney(NdotL, NdotV, NdotH, LdotH, material.roughness);
 
     //----------- Calculate final color
-    float3 Cdlin = float3(pow(gConst.baseColor[0], 2.2), pow(gConst.baseColor[1], 2.2), pow(gConst.baseColor[2], 2.2));
-    float3 Cspec0 = lerp(gConst.specular * .08 * float3(1), Cdlin, gConst.metallic);
-    float3 brdfn = outParams.x * Cdlin * (1 - gConst.metallic) + outParams.y * lerp(Cspec0, float3(1), outParams.z) + outParams.w;
+    float3 Cdlin = material.baseColor;
+    float3 Cspec0 = lerp(gConst.specular * .08 * float3(1), Cdlin, material.metallic);
+    float3 brdfn = outParams.x * Cdlin * (1 - material.metallic) + outParams.y * lerp(Cspec0, float3(1), outParams.z) + outParams.w;
     float3 colorh = brdfn * float3(NdotL) * gConst.lightIntensity.rgb;
+    colorh = AddImageBasedLighting(gEnvironmentMap, gEnvironmentSampler, colorh, Cdlin, Cspec0, material.metallic, material.roughness, norm, view, gConst.iblSettings);
 
     o_color = float4(colorh, 1.f);
 }

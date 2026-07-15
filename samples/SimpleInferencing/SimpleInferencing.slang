@@ -11,17 +11,27 @@
 import CooperativeVectorFunctions;
 import Utils;
 import LinearOps;
+import IBL;
+import PBRTextures;
 
 #include "NetworkConfig.h"
 #include <donut/shaders/binding_helpers.hlsli>
 
 DECLARE_CBUFFER(NeuralConstants, gConst, 0, 0);
 ByteAddressBuffer gMLPParams            :REGISTER_SRV(0, 0);
+Texture2D<float4> gEnvironmentMap       :REGISTER_SRV(1, 0);
+Texture2D<float4> gBaseColorMap         :REGISTER_SRV(2, 0);
+Texture2D<float4> gRoughnessMap         :REGISTER_SRV(3, 0);
+Texture2D<float4> gMetallicMap          :REGISTER_SRV(4, 0);
+Texture2D<float4> gNormalMap            :REGISTER_SRV(5, 0);
+SamplerState gEnvironmentSampler        :REGISTER_SAMPLER(0, 0);
 
 struct VertexIn
 {
     float3 pos : POSITION; 
     float3 norm : NORMAL; 
+    float3 tan : TANGENT;
+    float2 uv : TEXCOORD;
 };
 
 struct VertexOut
@@ -29,6 +39,8 @@ struct VertexOut
     float4 pos : SV_Position;
     float3 norm : NORMAL;
     float3 view : VIEW;
+    float3 tan : TANGENT;
+    float2 uv : TEXCOORD;
 }
 
 [shader("vertex")]
@@ -39,6 +51,8 @@ void main_vs(
     vOut.pos = mul(float4(vIn.pos, 1), gConst.viewProject);
     vOut.norm = vIn.norm;
     vOut.view = gConst.cameraPos.xyz - vIn.pos;
+    vOut.tan = vIn.tan;
+    vOut.uv = vIn.uv;
 }
 
 float4 DisneyMLP(float NdotL, float NdotV, float NdotH, float LdotH, float roughness)
@@ -86,14 +100,25 @@ void main_ps(
 {
     float4 lightIntensity = gConst.lightIntensity;
     float4 lightDir =  gConst.lightDir;
-    float4 baseColor = gConst.baseColor;
     float specular = gConst.specular;
-    float roughness = gConst.roughness;
-    float metallic = gConst.metallic;
 
     // Prepare input parameters
     float3 view = normalize(vOut.view);
-    float3 norm = normalize(vOut.norm);
+    PbrMaterialSample material = SamplePbrMaterial(
+        gBaseColorMap,
+        gRoughnessMap,
+        gMetallicMap,
+        gNormalMap,
+        gEnvironmentSampler,
+        vOut.uv,
+        vOut.norm,
+        vOut.tan,
+        gConst.baseColor,
+        gConst.roughness,
+        gConst.metallic);
+    float3 norm = material.normal;
+    float roughness = material.roughness;
+    float metallic = material.metallic;
     float3 h = normalize(-lightDir.xyz + view);
 
     float NdotL = max(0.f, dot(norm, -lightDir.xyz));
@@ -105,10 +130,11 @@ void main_ps(
     float4 outParams = DisneyMLP(NdotL, NdotV, NdotH, LdotH, roughness);
 
     // Calculate final color
-    float3 Cdlin = float3(pow(baseColor.r, 2.2), pow(baseColor.g, 2.2), pow(baseColor.b, 2.2));
+    float3 Cdlin = material.baseColor;
     float3 Cspec0 = lerp(specular * .08f * float3(1,1,1), Cdlin, metallic);
     float3 brdfn = outParams.x * Cdlin * (1 - metallic) + outParams.y * lerp(Cspec0, float3(1), outParams.z) + outParams.w;
     float3 colorh = brdfn * float3(NdotL) * lightIntensity.rgb;
+    colorh = AddImageBasedLighting(gEnvironmentMap, gEnvironmentSampler, colorh, Cdlin, Cspec0, metallic, roughness, norm, view, gConst.iblSettings);
 
     o_color = float4(colorh, 1.f);
  }
