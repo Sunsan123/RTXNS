@@ -177,7 +177,7 @@ std::pair<std::vector<Vertex>, std::vector<uint32_t>> GenerateSphere(float radiu
     return { vs, indices };
 }
 
-std::pair<std::vector<Vertex>, std::vector<uint32_t>> LoadObjModel(const std::filesystem::path& fileName, float targetMaxExtent)
+std::pair<std::vector<Vertex>, std::vector<uint32_t>> LoadObjModel(const std::filesystem::path& fileName, float targetMaxExtent, bool flipTexcoordV)
 {
     std::ifstream file(fileName);
     if (!file)
@@ -208,6 +208,10 @@ std::pair<std::vector<Vertex>, std::vector<uint32_t>> LoadObjModel(const std::fi
             float u = 0.f;
             float v = 0.f;
             stream >> u >> v;
+            if (flipTexcoordV)
+            {
+                v = 1.f - v;
+            }
             texcoords.emplace_back(u, v);
         }
         else if (line.rfind("vn ", 0) == 0)

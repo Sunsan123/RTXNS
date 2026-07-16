@@ -24,4 +24,4 @@ struct Vertex
 };
 
 std::pair<std::vector<Vertex>, std::vector<uint32_t>> GenerateSphere(float radius, uint32_t segmentsU, uint32_t segmentsV);
-std::pair<std::vector<Vertex>, std::vector<uint32_t>> LoadObjModel(const std::filesystem::path& fileName, float targetMaxExtent = 2.f);
+std::pair<std::vector<Vertex>, std::vector<uint32_t>> LoadObjModel(const std::filesystem::path& fileName, float targetMaxExtent = 2.f, bool flipTexcoordV = false);

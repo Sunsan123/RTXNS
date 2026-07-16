@@ -9,6 +9,8 @@
 
 add_subdirectory(SimpleInferencing)
 add_subdirectory(ShaderTraining)
+add_subdirectory(ShaderTrainingSilk)
+add_subdirectory(ShaderTrainingPreintegratedSkin)
 add_subdirectory(SimpleTraining)
 add_subdirectory(SlangpyTraining)
 add_subdirectory(SlangpyInferencing)
